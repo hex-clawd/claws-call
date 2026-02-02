@@ -19,9 +19,9 @@ AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
 
-# ElevenLabs
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+# Edge TTS
+EDGE_TTS_VOICE = os.getenv("EDGE_TTS_VOICE", "en-GB-RyanNeural")
+EDGE_TTS_LANGUAGE = os.getenv("EDGE_TTS_LANGUAGE", "en-GB")
 
 # Whisper STT
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small.en")
@@ -48,8 +48,6 @@ def validate_config():
         errors.append("AUTHORIZED_USER_ID not set")
     if not ANTHROPIC_API_KEY:
         errors.append("ANTHROPIC_API_KEY not set")
-    if not ELEVENLABS_API_KEY:
-        errors.append("ELEVENLABS_API_KEY not set")
 
     if errors:
         raise ValueError(f"Configuration errors: {', '.join(errors)}")

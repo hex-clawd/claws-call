@@ -14,7 +14,7 @@
 - Silero VAD → turn detection (700ms silence threshold)
 - Streaming STT (whisper.cpp or faster-whisper)
 - Claude API streaming
-- ElevenLabs WebSocket TTS streaming
+- Edge TTS streaming
 - Async pipeline with interruption handling
 
 ### Phase 3: Polish (1-2 days)
@@ -49,7 +49,7 @@
 - Streaming messages
 
 ### TTS
-- **ElevenLabs** WebSocket streaming (primary)
+- **Edge TTS** streaming (primary)
 - **Fallback:** Piper TTS (local, fast, free)
 - Output: 16kHz PCM → resample to 48kHz for Telegram
 
@@ -84,7 +84,7 @@ telegram-voice-call/
 │   ├── __init__.py
 │   ├── vad.py             # Silero VAD turn detection
 │   ├── stt.py             # Whisper STT (faster-whisper or whisper_streaming)
-│   ├── tts.py             # ElevenLabs + Piper TTS
+│   ├── tts.py             # Edge TTS + Piper TTS
 │   └── utils.py           # Resample, format conversion
 ├── llm/
 │   ├── __init__.py
@@ -111,13 +111,7 @@ telegram-voice-call/
   - `ANTHROPIC_API_KEY`
 - Model: `claude-3-5-sonnet-20241022` or latest
 
-### 3. ElevenLabs
-- **API key:** https://elevenlabs.io/app/settings/api-keys
-  - `ELEVENLABS_API_KEY`
-- **Voice ID:** Choose from voice library
-  - `ELEVENLABS_VOICE_ID`
-
-### 4. (Optional) Piper TTS
+### 3. (Optional) Piper TTS
 - No API key needed (local)
 - Download model from https://github.com/rhasspy/piper/releases
 
@@ -132,10 +126,6 @@ PHONE_NUMBER=+1234567890
 
 # Claude
 ANTHROPIC_API_KEY=sk-ant-...
-
-# ElevenLabs
-ELEVENLABS_API_KEY=...
-ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM  # Rachel
 
 # Whisper
 WHISPER_MODEL_PATH=~/clawd/models/ggml-small.en.bin
@@ -178,7 +168,7 @@ async def on_played_data(call, length: int) -> bytes:
 
 async def handle_user_turn(text: str):
     async for llm_chunk in claude.stream(text):
-        async for audio_chunk in elevenlabs.stream(llm_chunk):
+        async for audio_chunk in edge_tts.stream(llm_chunk):
             tts_buffer.append(audio_chunk)
 ```
 

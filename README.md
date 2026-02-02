@@ -7,13 +7,13 @@ Real-time voice conversation system over Telegram. Phase 1 MVP: Voice message-ba
 - Receives voice messages from authorized Telegram user
 - Transcribes audio using faster-whisper (local STT)
 - Generates responses using Claude API
-- Converts responses to speech using ElevenLabs TTS
+- Converts responses to speech using Edge TTS
 - Replies with voice messages
 
 ## Architecture
 
 ```
-Voice Message → STT (faster-whisper) → Claude API → TTS (ElevenLabs) → Voice Reply
+Voice Message → STT (faster-whisper) → Claude API → TTS (Edge TTS) → Voice Reply
 ```
 
 ## Requirements
@@ -21,7 +21,7 @@ Voice Message → STT (faster-whisper) → Claude API → TTS (ElevenLabs) → V
 - Python 3.11+
 - Mac Mini M4 (Apple Silicon) or compatible system
 - Telegram account (phone number required)
-- API keys: Telegram, Anthropic (Claude), ElevenLabs
+- API keys: Telegram, Anthropic (Claude)
 
 ## Setup
 
@@ -50,13 +50,7 @@ pip install -r requirements.txt
 2. Create an API key
 3. Copy the key (starts with `sk-ant-`)
 
-### 5. Get ElevenLabs API Key
-
-1. Go to https://elevenlabs.io/app/settings/api-keys
-2. Create an API key
-3. Choose a voice ID from the voice library (default: Rachel)
-
-### 6. Configure Environment
+### 5. Configure Environment
 
 Create a `.env` file from the template:
 
@@ -77,10 +71,6 @@ AUTHORIZED_USER_ID=123456789                 # From @userinfobot
 
 # Claude
 ANTHROPIC_API_KEY=sk-ant-...                 # From console.anthropic.com
-
-# ElevenLabs
-ELEVENLABS_API_KEY=...                       # From elevenlabs.io
-ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM    # Voice ID (Rachel by default)
 
 # Whisper
 WHISPER_MODEL=small.en                       # Model size: tiny.en, base.en, small.en, medium.en
@@ -140,7 +130,7 @@ telegram-voice-call/
 ├── audio/
 │   ├── __init__.py
 │   ├── stt.py              # Speech-to-text (faster-whisper)
-│   └── tts.py              # Text-to-speech (ElevenLabs)
+│   └── tts.py              # Text-to-speech (Edge TTS)
 └── llm/
     ├── __init__.py
     └── claude.py           # Claude API integration
@@ -178,7 +168,7 @@ Phase 2 will implement real-time voice chat using:
 - pytgcalls for group voice chat
 - Streaming STT with VAD (Silero)
 - Real-time Claude API streaming
-- ElevenLabs WebSocket streaming TTS
+- Edge TTS streaming
 - Interruption handling
 
 See `PLAN.md` for full roadmap.

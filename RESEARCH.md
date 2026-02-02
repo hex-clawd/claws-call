@@ -234,33 +234,19 @@ Since `GroupCallRaw` gives you both input AND output callbacks, you have full co
 
 ## 6. TTS Streaming
 
-### ElevenLabs WebSocket Streaming (Best quality)
-- **Docs:** https://elevenlabs.io/docs/developers/websockets
-- WebSocket endpoint: `wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input`
-- Send text chunks as LLM generates them → receive audio chunks back
-- Latency: ~300-500ms to first audio byte
-- Output: mp3 or pcm_16000 or pcm_22050 or pcm_24000
+### Edge TTS (Free, no API key)
+- Microsoft Edge's free TTS service
+- High-quality neural voices
+- No API key required
+- Python package: edge-tts
+- Latency: ~300-500ms
 
 ```python
-import websockets, json
+import edge_tts
 
-async def stream_tts(text_chunks, voice_id):
-    uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input?model_id=eleven_turbo_v2&output_format=pcm_16000"
-    async with websockets.connect(uri) as ws:
-        # Send voice settings
-        await ws.send(json.dumps({"text": " ", "voice_settings": {...}}))
-        
-        # Stream text as it comes from LLM
-        for chunk in text_chunks:
-            await ws.send(json.dumps({"text": chunk}))
-            # Receive audio
-            response = await ws.recv()
-            audio = json.loads(response).get("audio")
-            if audio:
-                yield base64.b64decode(audio)
-        
-        # Close stream
-        await ws.send(json.dumps({"text": ""}))
+async def generate_tts(text: str, output_path: str):
+    communicate = edge_tts.Communicate(text, voice='en-GB-RyanNeural')
+    await communicate.save(output_path)
 ```
 
 ### Local TTS Alternatives
@@ -306,7 +292,7 @@ async def stream_tts(text_chunks, voice_id):
 │                      └──────┬──────┘  └────▲─────┘  │
 │                             │              │         │
 │                      ┌──────▼──────┐  ┌────┴─────┐  │
-│                      │ Whisper STT │  │ElevenLabs│  │
+│                      │ Whisper STT │  │ Edge TTS │  │
 │                      │(faster-wh.) │  │ or Piper │  │
 │                      └──────┬──────┘  └────▲─────┘  │
 │                             │              │         │
@@ -324,7 +310,7 @@ async def stream_tts(text_chunks, voice_id):
 3. **When speech ends** (silence > 700ms) → accumulated audio sent to STT
 4. **STT** → faster-whisper or whisper.cpp transcribes → text
 5. **LLM** → Claude API with streaming response
-6. **TTS** → ElevenLabs WebSocket (stream text as LLM generates) → audio chunks
+6. **TTS** → Edge TTS (stream text as LLM generates) → audio chunks
 7. **Play back** → Audio chunks pushed into `on_played_data` callback → Telegram WebRTC → user hears response
 
 ### Latency Budget (estimated)
@@ -355,13 +341,14 @@ This is acceptable for conversational AI. Comparable to phone-based assistants.
 | **ufal/whisper_streaming** | Real-time streaming STT | https://github.com/ufal/whisper_streaming |
 | **Silero VAD** | Voice activity detection | https://github.com/snakers4/silero-vad |
 | **Piper TTS** | Fast local TTS | https://github.com/rhasspy/piper |
+| **Edge TTS** | Free Microsoft TTS | https://github.com/rany2/edge-tts |
 | **TheHamkerCat/Telegram_VC_Bot** | Music bot for voice chats | https://github.com/TheHamkerCat/Telegram_VC_Bot |
 
 ### Pipecat — Worth Studying
 Pipecat by Daily.co is the closest architectural reference. It's a full voice agent framework with:
 - STT (Whisper, Deepgram, etc.)
 - LLM (OpenAI, Anthropic, etc.)
-- TTS (ElevenLabs, etc.)
+- TTS (Edge TTS, etc.)
 - VAD (Silero built-in)
 - Interruption handling
 - Transport layer (Daily rooms, WebRTC)
@@ -417,7 +404,7 @@ If real-time calls prove too complex, a simpler MVP:
 | Real-time STT | 🟢 Easy | whisper.cpp/faster-whisper excellent on M4 |
 | VAD / Turn detection | 🟢 Easy | Silero VAD is plug-and-play |
 | Interruption handling | 🟡 Medium | Needs careful async design |
-| TTS streaming | 🟢 Easy | ElevenLabs WebSocket or Piper |
+| TTS streaming | 🟢 Easy | Edge TTS or Piper |
 | Full pipeline integration | 🟡 Medium | Async plumbing, format conversion, error handling |
 | Private 1-on-1 calls | 🔴 Hard | Not in stable release; use voice chat workaround |
 
@@ -436,6 +423,6 @@ If real-time calls prove too complex, a simpler MVP:
 pip install pyrogram tgcalls pytgcalls[pyrogram]
 pip install faster-whisper  # or build whisper.cpp
 pip install torch  # for Silero VAD
-pip install elevenlabs  # or piper-tts for local
+pip install edge-tts  # or piper-tts for local
 pip install numpy scipy  # audio processing
 ```
