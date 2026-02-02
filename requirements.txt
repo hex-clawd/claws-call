@@ -2,9 +2,17 @@
 pyrogram>=2.0.106
 tgcrypto>=1.2.5
 
+# Voice call support
+pytgcalls>=3.0.0
+py-tgcalls>=0.9.7
+
 # STT
 faster-whisper>=1.0.0
 numpy>=1.24.0
+
+# VAD (Voice Activity Detection)
+torch>=2.0.0
+torchaudio>=2.0.0
 
 # LLM
 anthropic>=0.40.0
