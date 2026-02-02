@@ -1,19 +1,48 @@
 # Telegram Voice Call AI Assistant
 
-Real-time voice conversation system over Telegram. Phase 1 MVP: Voice message-based interaction.
+Real-time voice conversation system over Telegram with two operational modes:
+- **Phase 1**: Voice message-based interaction (stable)
+- **Phase 2**: Real-time voice chat with live conversation (NEW!)
 
-## Features (Phase 1)
+## Features
 
+### Phase 1: Voice Messages
 - Receives voice messages from authorized Telegram user
 - Transcribes audio using faster-whisper (local STT)
 - Generates responses using Claude API
 - Converts responses to speech using Edge TTS
 - Replies with voice messages
 
+### Phase 2: Real-Time Voice Chat (NEW!)
+- Live bidirectional voice conversation in Telegram group voice chats
+- Voice Activity Detection (Silero VAD) for turn detection
+- Interruption handling: cancel AI response when user speaks
+- Streaming TTS for lower latency
+- Auto-rejoin on disconnect with exponential backoff
+- Configurable VAD thresholds for tuning responsiveness
+
 ## Architecture
 
+### Phase 1: Voice Messages
 ```
 Voice Message → STT (faster-whisper) → Claude API → TTS (Edge TTS) → Voice Reply
+```
+
+### Phase 2: Real-Time Voice Chat
+```
+Telegram Voice Chat (pytgcalls GroupCallRaw)
+    ↓ PCM 48kHz
+Audio Pipeline
+    ↓ Resample to 16kHz
+Silero VAD (turn detection)
+    ↓ On turn end
+faster-whisper STT
+    ↓ Transcription
+Claude API (streaming capable)
+    ↓ Response text
+Edge TTS (streaming)
+    ↓ Resample to 48kHz
+Back to Voice Chat
 ```
 
 ## Requirements
@@ -22,6 +51,7 @@ Voice Message → STT (faster-whisper) → Claude API → TTS (Edge TTS) → Voi
 - Mac Mini M4 (Apple Silicon) or compatible system
 - Telegram account (phone number required)
 - API keys: Telegram, Anthropic (Claude)
+- For Phase 2: A private Telegram group (for voice chat)
 
 ## Setup
 
@@ -75,6 +105,17 @@ ANTHROPIC_API_KEY=sk-ant-...                 # From console.anthropic.com
 # Whisper
 WHISPER_MODEL=small.en                       # Model size: tiny.en, base.en, small.en, medium.en
 
+# Bot Mode
+BOT_MODE=voice_message                       # "voice_message" (Phase 1) or "voice_chat" (Phase 2)
+
+# Voice Chat Settings (required for voice_chat mode)
+VOICE_CHAT_GROUP_ID=0                        # Private group chat ID (see setup below)
+
+# VAD Settings (for voice_chat mode)
+VAD_SILENCE_THRESHOLD_MS=700                 # Silence duration to detect end of turn
+VAD_SPEECH_THRESHOLD=0.5                     # Speech detection sensitivity
+VAD_MIN_SPEECH_DURATION_MS=300               # Minimum speech duration
+
 # Logging
 LOG_LEVEL=INFO
 ```
@@ -91,16 +132,17 @@ python main.py
 
 You'll receive a code via Telegram. Enter it when prompted. A session file will be created for future runs.
 
-### Running the Bot
+### Phase 1: Voice Message Mode
+
+Set `BOT_MODE=voice_message` in `.env`, then:
 
 ```bash
 python main.py
 ```
 
-The bot will start and listen for voice messages. Only the authorized user (specified by `AUTHORIZED_USER_ID`) can interact with it.
+The bot will start and listen for voice messages.
 
-### Interacting with the Bot
-
+**Interacting:**
 1. Open Telegram and find your own chat (Saved Messages) or any private chat
 2. Send a voice message
 3. The bot will:
@@ -108,6 +150,52 @@ The bot will start and listen for voice messages. Only the authorized user (spec
    - Generate a response using Claude
    - Convert it to speech
    - Reply with a voice message
+
+### Phase 2: Voice Chat Mode (Real-Time)
+
+**Setup:**
+
+1. Create a private group in Telegram:
+   - Create a new group
+   - Add only yourself and the bot account
+   - Start a voice chat in the group
+
+2. Get the group chat ID:
+   ```python
+   # Run this script or use @RawDataBot
+   from pyrogram import Client
+   app = Client("userbot", api_id=API_ID, api_hash=API_HASH)
+   app.start()
+
+   # List all dialogs to find your group
+   for dialog in app.get_dialogs():
+       print(f"{dialog.chat.title}: {dialog.chat.id}")
+   ```
+
+3. Set configuration in `.env`:
+   ```bash
+   BOT_MODE=voice_chat
+   VOICE_CHAT_GROUP_ID=-1001234567890  # Your group chat ID (negative number)
+   ```
+
+4. Run the bot:
+   ```bash
+   python main.py
+   ```
+
+5. Join the voice chat in Telegram (the bot will already be there)
+
+**Interacting:**
+1. Speak naturally into the voice chat
+2. The bot detects when you finish speaking (700ms silence by default)
+3. Your speech is transcribed, sent to Claude, and the response is spoken back
+4. You can interrupt the bot at any time by speaking
+
+**Tuning VAD:**
+- Adjust `VAD_SILENCE_THRESHOLD_MS` for faster/slower turn detection
+- Lower = more responsive but may cut off mid-sentence
+- Higher = more patient but slower response
+- Default 700ms works well for most cases
 
 ## Security
 
@@ -119,21 +207,29 @@ The bot will start and listen for voice messages. Only the authorized user (spec
 
 ```
 telegram-voice-call/
-├── main.py                 # Entry point
+├── main.py                 # Entry point (supports both modes)
 ├── config.py               # Configuration management
 ├── requirements.txt        # Python dependencies
 ├── .env                    # Environment variables (gitignored)
 ├── .env.example            # Environment template
+├── PLAN.md                 # Implementation plan
+├── RESEARCH.md             # Technical research
 ├── bot/
 │   ├── __init__.py
-│   └── userbot.py          # Pyrogram userbot with voice message handler
+│   ├── userbot.py          # Pyrogram userbot with voice message handler
+│   └── voice_chat.py       # pytgcalls integration for real-time voice chat
 ├── audio/
 │   ├── __init__.py
 │   ├── stt.py              # Speech-to-text (faster-whisper)
-│   └── tts.py              # Text-to-speech (Edge TTS)
-└── llm/
+│   ├── tts.py              # Text-to-speech (Edge TTS with streaming)
+│   ├── vad.py              # Voice Activity Detection (Silero VAD)
+│   └── utils.py            # Audio resampling and format conversion
+├── llm/
+│   ├── __init__.py
+│   └── claude.py           # Claude API integration
+└── pipeline/
     ├── __init__.py
-    └── claude.py           # Claude API integration
+    └── voice_pipeline.py   # Main async pipeline for real-time processing
 ```
 
 ## Troubleshooting
@@ -162,14 +258,11 @@ If faster-whisper fails to load:
 - Check internet connection
 - Check API quotas/limits
 
-## Next Steps (Phase 2)
+## Implementation Status
 
-Phase 2 will implement real-time voice chat using:
-- pytgcalls for group voice chat
-- Streaming STT with VAD (Silero)
-- Real-time Claude API streaming
-- Edge TTS streaming
-- Interruption handling
+- ✅ Phase 1: Voice message MVP (complete)
+- ✅ Phase 2: Real-time voice chat with VAD and interruption handling (complete)
+- ⏳ Phase 3: Latency optimization and polish (planned)
 
 See `PLAN.md` for full roadmap.
 
