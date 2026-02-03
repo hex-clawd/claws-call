@@ -32,7 +32,7 @@ SAMPLE_RATE_EXTERNAL = 24000  # External source playback rate (ntgcalls expects 
 
 # Voice chat settings
 VOICE_CHAT_GROUP_ID = int(os.getenv("VOICE_CHAT_GROUP_ID", "0"))  # Private group ID for voice chat
-VAD_SILENCE_THRESHOLD_MS = int(os.getenv("VAD_SILENCE_THRESHOLD_MS", "700"))  # Silence duration to detect turn end
+VAD_SILENCE_THRESHOLD_MS = int(os.getenv("VAD_SILENCE_THRESHOLD_MS", "1500"))  # Silence duration to detect turn end
 VAD_SPEECH_THRESHOLD = float(os.getenv("VAD_SPEECH_THRESHOLD", "0.5"))  # Silero VAD probability threshold
 VAD_MIN_SPEECH_DURATION_MS = int(os.getenv("VAD_MIN_SPEECH_DURATION_MS", "300"))  # Min speech to be valid
 AUTO_REJOIN_BACKOFF_BASE = float(os.getenv("AUTO_REJOIN_BACKOFF_BASE", "2.0"))  # Exponential backoff base
