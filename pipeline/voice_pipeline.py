@@ -418,6 +418,19 @@ class VoicePipeline:
                 await self.voice_chat.play_audio(audio_chunk)
                 chunks_played += 1
 
+            # Wait for buffer to drain before marking complete
+            # This ensures all audio plays before response is considered done
+            if not self.interrupted.is_set():
+                drain_waited = 0
+                while len(self.voice_chat.output_buffer) > 0:
+                    if self.interrupted.is_set():
+                        logger.info(f"Buffer drain interrupted after {drain_waited} waits")
+                        break
+                    await asyncio.sleep(0.05)
+                    drain_waited += 1
+                if drain_waited > 0:
+                    logger.info(f"Buffer drained after {drain_waited * 50}ms")
+
             logger.info(f"TTS complete: {chunks_played} chunks played")
 
         except asyncio.CancelledError:

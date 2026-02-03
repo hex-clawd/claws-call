@@ -33,7 +33,7 @@
 - [x] Interruption handling
 - [x] Markdown stripping
 - [ ] **Streaming LLM → TTS** (end goal for low latency)
-- [ ] Auto-join when user starts call (not bot-initiated)
+- [x] Auto-join when user starts call (not bot-initiated)
 - [ ] Buffer flush delay at end (last words cut off)
 - [ ] Latency optimization (<2.5s target)
 - [ ] Error recovery, reconnection logic
