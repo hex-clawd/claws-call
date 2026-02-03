@@ -2,6 +2,7 @@
 
 import logging
 import asyncio
+import re
 import numpy as np
 from collections import deque
 from typing import Optional
@@ -13,6 +14,65 @@ from llm.clawdbot import ClawdbotClient
 import config
 
 logger = logging.getLogger(__name__)
+
+
+def strip_markdown(text: str) -> str:
+    """
+    Strip markdown formatting from text for TTS.
+    
+    Converts markdown to plain readable text so TTS doesn't read
+    "asterisk" or "backtick" literally.
+    
+    Args:
+        text: Text potentially containing markdown
+        
+    Returns:
+        Plain text suitable for speech
+    """
+    # Remove code blocks (```code```)
+    text = re.sub(r'```[\s\S]*?```', '', text)
+    
+    # Remove inline code (`code`) - extract the code content
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    
+    # Remove images ![alt](url)
+    text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', r'\1', text)
+    
+    # Convert links [text](url) to just text
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    
+    # Remove headers (# ## ### etc) - keep the text
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    
+    # Remove bold/italic: ***text***, **text**, *text*, ___text___, __text__, _text_
+    # Process triple markers first, then double, then single
+    text = re.sub(r'\*\*\*([^*]+)\*\*\*', r'\1', text)
+    text = re.sub(r'___([^_]+)___', r'\1', text)
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
+    text = re.sub(r'__([^_]+)__', r'\1', text)
+    text = re.sub(r'\*([^*]+)\*', r'\1', text)
+    text = re.sub(r'_([^_]+)_', r'\1', text)
+    
+    # Remove strikethrough ~~text~~
+    text = re.sub(r'~~([^~]+)~~', r'\1', text)
+    
+    # Remove blockquotes (> text)
+    text = re.sub(r'^>\s*', '', text, flags=re.MULTILINE)
+    
+    # Remove horizontal rules (---, ***, ___)
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    
+    # Remove bullet points (* - +) but keep the text
+    text = re.sub(r'^\s*[-*+]\s+', '', text, flags=re.MULTILINE)
+    
+    # Remove numbered lists (1. 2. etc) but keep the text
+    text = re.sub(r'^\s*\d+\.\s+', '', text, flags=re.MULTILINE)
+    
+    # Clean up extra whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = text.strip()
+    
+    return text
 
 
 class VoicePipeline:
@@ -275,9 +335,13 @@ class VoicePipeline:
                 logger.info("Interrupted after LLM, not speaking")
                 return
 
+            # Strip markdown for clean TTS output
+            clean_text = strip_markdown(response_text)
+            logger.debug(f"Text for TTS (markdown stripped): {clean_text}")
+
             # Generate and play TTS
             self.is_speaking = True
-            await self._speak_text(response_text)
+            await self._speak_text(clean_text)
             self.is_speaking = False
 
             logger.info("Response complete")

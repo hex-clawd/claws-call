@@ -243,10 +243,13 @@ class ClawdbotClient:
             self._chat_responses[idempotency_key] = []
             self._chat_complete_events[idempotency_key] = asyncio.Event()
 
+            # Prefix with voice chat context so Hex knows the source
+            prefixed_message = f"[VOICE_CHAT] {user_message}"
+
             # Send chat.send request
             params = {
                 "sessionKey": session_key,
-                "message": user_message,
+                "message": prefixed_message,
                 "idempotencyKey": idempotency_key
             }
 
