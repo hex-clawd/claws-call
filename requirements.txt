@@ -1,10 +1,9 @@
-# Telegram client
-pyrogram>=2.0.106
+# Telegram client (pyrofork is a pyrogram fork with group call support)
+pyrofork>=2.3.69
 tgcrypto>=1.2.5
 
 # Voice call support
-pytgcalls>=3.0.0
-py-tgcalls>=0.9.7
+py-tgcalls>=2.2.10
 
 # STT
 faster-whisper>=1.0.0

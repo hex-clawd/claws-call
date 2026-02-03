@@ -1,21 +1,54 @@
-"""Voice chat integration using pytgcalls."""
+"""Voice chat integration using pytgcalls 2.x API."""
 
 import logging
 import asyncio
 from collections import deque
 from typing import Optional
-from pytgcalls import PyTgCalls
-from pytgcalls.types import Update
-from pytgcalls.types.input_stream import AudioPiped, InputAudioStream
-from pytgcalls.types.input_stream.quality import HighQualityAudio
+from pytgcalls import PyTgCalls, filters
+from pytgcalls.types import (
+    MediaStream,
+    AudioQuality,
+    RecordStream,
+    StreamFrames,
+    StreamEnded,
+    Direction,
+    Device,
+    ExternalMedia,
+)
+from pytgcalls.types.raw import AudioParameters, AudioStream, Stream
+from ntgcalls import MediaSource
 import config
 from audio.utils import convert_telegram_to_whisper, convert_whisper_to_telegram, generate_silence
 
 logger = logging.getLogger(__name__)
 
+# Audio parameters for external source output
+# IMPORTANT: ntgcalls expects 24kHz for external audio sources via send_frame()
+# Using 48kHz results in chipmunk (2x speed) playback
+AUDIO_PARAMS_MONO = AudioParameters(
+    bitrate=config.SAMPLE_RATE_EXTERNAL,  # 24kHz - matches what ntgcalls expects
+    channels=1,  # Mono for TTS playback
+)
+
+# Audio parameters for stereo (for receiving - Telegram sends stereo at 48kHz)
+AUDIO_PARAMS_STEREO = AudioParameters(
+    bitrate=config.SAMPLE_RATE_TG,
+    channels=2,  # Stereo for receiving
+)
+
+# Chunk size for 10ms of audio at 24kHz mono 16-bit
+# 24000 samples/sec * 0.01 sec * 2 bytes/sample * 1 channel = 480 bytes
+CHUNK_SIZE = config.SAMPLE_RATE_EXTERNAL * 2 * 1 // 100  # 10ms chunks (mono, 24kHz)
+
 
 class VoiceChat:
-    """Voice chat handler using pytgcalls."""
+    """Voice chat handler using pytgcalls 2.x API.
+
+    This implementation uses:
+    - MediaStream with ExternalMedia.AUDIO for output (sending audio to the call)
+    - RecordStream with on_update for input (receiving audio from the call)
+    - send_frame() for dynamic audio playback
+    """
 
     def __init__(self, client, pipeline):
         """
@@ -30,52 +63,70 @@ class VoiceChat:
         self.pytgcalls = PyTgCalls(client)
 
         # Audio buffers
-        self.input_buffer = deque()  # Buffer for incoming audio from Telegram
         self.output_buffer = deque()  # Buffer for outgoing audio to Telegram
 
         # State
         self.is_connected = False
         self.is_playing = False
         self.reconnect_attempts = 0
+        self._playback_task: Optional[asyncio.Task] = None
 
         # Configuration
         self.group_id = config.VOICE_CHAT_GROUP_ID
-        self.chunk_duration_ms = 20  # 20ms chunks (standard for VoIP)
-        self.samples_per_chunk_48k = int(48000 * self.chunk_duration_ms / 1000)  # 960 samples
-        self.bytes_per_chunk_48k = self.samples_per_chunk_48k * 2  # 16-bit = 2 bytes per sample
 
-        logger.info("VoiceChat initialized")
+        logger.info("VoiceChat initialized for pytgcalls 2.x")
 
     async def start(self):
-        """Start the voice chat handler and connect to pytgcalls."""
+        """Start the voice chat handler (deprecated - use join_voice_chat directly)."""
+        # Handler registration moved to join_voice_chat() to ensure proper ordering
+        logger.warning("start() is deprecated - handlers are now registered in join_voice_chat()")
+        pass
+
+    async def _handle_incoming_audio(self, update: StreamFrames):
+        """Handle incoming audio frames from the call.
+
+        Args:
+            update: StreamFrames containing audio data from participants
+        """
         try:
-            logger.info("Starting pytgcalls...")
-            await self.pytgcalls.start()
+            # Log that we're receiving frames (with rate limiting to avoid spam)
+            if not hasattr(self, '_frame_count'):
+                self._frame_count = 0
+            self._frame_count += 1
+            if self._frame_count == 1:
+                logger.info(f"Receiving audio frames from chat {update.chat_id}")
+            elif self._frame_count % 100 == 0:  # Log every 100 frames (~1 second)
+                logger.debug(f"Received {self._frame_count} audio frames so far")
 
-            # Register handlers
-            @self.pytgcalls.on_stream_end()
-            async def on_stream_end(client, update: Update):
-                logger.info("Stream ended")
-                await self.handle_stream_end()
+            # Process each frame (each participant's audio)
+            for frame in update.frames:
+                # frame.frame contains PCM audio bytes (48kHz, 16-bit, stereo)
+                audio_data = frame.frame
 
-            @self.pytgcalls.on_kicked()
-            async def on_kicked(client, chat_id: int):
-                logger.warning(f"Kicked from voice chat in {chat_id}")
-                await self.handle_disconnect()
+                if self._frame_count <= 5:
+                    logger.info(f"Audio frame received: {len(audio_data)} bytes from participant")
 
-            @self.pytgcalls.on_left()
-            async def on_left(client, chat_id: int):
-                logger.info(f"Left voice chat in {chat_id}")
-                await self.handle_disconnect()
+                # Convert from Telegram format (48kHz stereo) to Whisper format (16kHz mono)
+                audio_16k = convert_telegram_to_whisper(audio_data, stereo=True)
 
-            logger.info("pytgcalls started successfully")
+                if self._frame_count <= 5:
+                    logger.info(f"Converted to 16kHz mono: {len(audio_16k)} samples")
+
+                # Send to pipeline for processing (VAD -> STT -> LLM -> TTS)
+                if self.pipeline:
+                    asyncio.create_task(self.pipeline.process_input_audio(audio_16k))
 
         except Exception as e:
-            logger.error(f"Failed to start pytgcalls: {e}")
-            raise
+            logger.error(f"Error processing incoming audio: {e}")
 
     async def join_voice_chat(self):
-        """Join the configured voice chat group."""
+        """Join the configured voice chat group.
+        
+        This follows the official pytgcalls bridged_calls example:
+        https://github.com/pytgcalls/pytgcalls/blob/master/example/bridged_calls/
+        
+        Key: Must call play() FIRST with ExternalMedia, THEN record()!
+        """
         try:
             if self.is_connected:
                 logger.warning("Already connected to voice chat")
@@ -83,75 +134,112 @@ class VoiceChat:
 
             logger.info(f"Joining voice chat in group {self.group_id}...")
 
-            # Create audio stream with piped input
-            # This allows us to feed audio dynamically
-            stream = InputAudioStream(
-                AudioPiped(self._audio_producer, HighQualityAudio()),
-            )
+            # Step 1: Start pytgcalls
+            await self.pytgcalls.start()
+            logger.info("pytgcalls started")
 
-            await self.pytgcalls.join_group_call(
-                self.group_id,
-                stream,
-                stream_type='input'
+            # Step 2: Call play() FIRST with ExternalMedia.AUDIO to join call
+            # This sets up outgoing audio via send_frame()
+            # IMPORTANT: Use MONO (1 channel) for external source since TTS generates mono audio
+            # Using stereo here while sending mono frames causes "External source not initialized"
+            external_mono_stream = Stream(
+                microphone=AudioStream(
+                    media_source=MediaSource.EXTERNAL,
+                    path='',  # Empty path for external source
+                    parameters=AUDIO_PARAMS_MONO,  # 48kHz MONO
+                ),
             )
+            
+            await self.pytgcalls.play(
+                self.group_id,
+                external_mono_stream,
+            )
+            logger.info("Joined call with play() + ExternalMedia.AUDIO (mono)")
+
+            # Step 3: Call record() to enable INCOMING audio frame callbacks
+            # This sets up the PLAYBACK stream sources for receiving audio
+            await self.pytgcalls.record(
+                self.group_id,
+                RecordStream(
+                    True,  # audio=True
+                    AudioQuality.HIGH,  # Must match play() parameters!
+                ),
+            )
+            logger.info("RecordStream enabled - listening for incoming audio")
+
+            # Step 4: Register handlers
+            # Handler for ALL stream_frame events (debug)
+            @self.pytgcalls.on_update(filters.stream_frame())
+            def on_any_frame(client: PyTgCalls, update: StreamFrames):
+                logger.info(f"FRAME: dir={update.direction}, dev={update.device}, count={len(update.frames)}")
+
+            # Handler for incoming audio - EXACTLY as in bridged_calls example
+            @self.pytgcalls.on_update(
+                filters.stream_frame(
+                    Direction.INCOMING,
+                    Device.MICROPHONE,
+                )
+            )
+            def on_incoming_audio(client: PyTgCalls, update: StreamFrames):
+                logger.info(f"INCOMING AUDIO: {len(update.frames)} frames")
+                asyncio.create_task(self._handle_incoming_audio(update))
+
+            # Handler for stream end
+            @self.pytgcalls.on_update(filters.stream_end)
+            def on_stream_end(client: PyTgCalls, update: StreamEnded):
+                logger.info(f"Stream ended for chat {update.chat_id}")
+                asyncio.create_task(self.handle_stream_end())
+
+            logger.info("Audio frame handlers registered")
 
             self.is_connected = True
             self.reconnect_attempts = 0
-            logger.info("Successfully joined voice chat")
+            logger.info("Successfully joined voice chat - waiting for audio frames")
 
-            # Start audio processing loop
-            asyncio.create_task(self._audio_input_loop())
+            # Start playback loop for outputting buffered audio
+            self._playback_task = asyncio.create_task(self._playback_loop())
 
         except Exception as e:
             logger.error(f"Failed to join voice chat: {e}")
             raise
 
-    async def _audio_producer(self):
-        """
-        Audio producer for pytgcalls (feeds audio to the call).
-        This is called by pytgcalls to get audio data to play.
-
-        Yields:
-            PCM audio bytes (16-bit, 48kHz, mono)
-        """
-        logger.info("Audio producer started")
+    async def _playback_loop(self):
+        """Loop that sends buffered audio to the call using send_frame()."""
+        logger.info("Playback loop started")
+        frames_sent = 0
 
         try:
             while self.is_connected:
                 if self.output_buffer:
-                    # Send audio from output buffer
+                    # Get chunk from buffer
                     chunk = self.output_buffer.popleft()
-                    yield chunk
-                else:
-                    # Send silence when no audio is ready
-                    silence = generate_silence(
-                        self.chunk_duration_ms,
-                        sample_rate=config.SAMPLE_RATE_TG,
-                        sample_width=2
+
+                    # Send to the call
+                    await self.pytgcalls.send_frame(
+                        self.group_id,
+                        Device.MICROPHONE,
+                        chunk,
                     )
-                    yield silence
+                    frames_sent += 1
+                    
+                    # Log progress periodically
+                    if frames_sent == 1:
+                        logger.info(f"Sending first audio frame ({len(chunk)} bytes)")
+                    elif frames_sent % 100 == 0:  # Log every 100 frames (~1 second)
+                        logger.info(f"Sent {frames_sent} audio frames, buffer: {len(self.output_buffer)}")
 
-                # Small delay to control chunk rate
-                await asyncio.sleep(self.chunk_duration_ms / 1000.0)
+                    # Wait for chunk duration (10ms for 960 bytes at 48kHz mono)
+                    await asyncio.sleep(0.01)
+                else:
+                    # No audio to play, just wait a bit
+                    await asyncio.sleep(0.01)
 
+        except asyncio.CancelledError:
+            logger.info(f"Playback loop cancelled (sent {frames_sent} frames)")
         except Exception as e:
-            logger.error(f"Audio producer error: {e}")
+            logger.error(f"Playback loop error after {frames_sent} frames: {e}")
         finally:
-            logger.info("Audio producer stopped")
-
-    async def _audio_input_loop(self):
-        """
-        Audio input loop for receiving audio from the call.
-        Note: pytgcalls doesn't have a built-in callback for receiving audio,
-        so we need to use a different approach or the underlying tgcalls library.
-
-        For now, this is a placeholder. We'll need to use the lower-level
-        tgcalls API or GroupCallRaw for bidirectional audio.
-        """
-        # TODO: Implement audio input using lower-level API
-        # This requires using py-tgcalls directly with GroupCallRaw
-        logger.warning("Audio input loop not yet implemented - requires GroupCallRaw")
-        pass
+            logger.info(f"Playback loop stopped (total frames sent: {frames_sent})")
 
     async def leave_voice_chat(self):
         """Leave the voice chat."""
@@ -162,7 +250,16 @@ class VoiceChat:
 
             logger.info("Leaving voice chat...")
 
-            await self.pytgcalls.leave_group_call(self.group_id)
+            # Cancel playback task
+            if self._playback_task:
+                self._playback_task.cancel()
+                try:
+                    await self._playback_task
+                except asyncio.CancelledError:
+                    pass
+                self._playback_task = None
+
+            await self.pytgcalls.leave_call(self.group_id)
 
             self.is_connected = False
             self.output_buffer.clear()
@@ -182,6 +279,11 @@ class VoiceChat:
         """Handle disconnection from voice chat."""
         logger.warning("Handling voice chat disconnect...")
         self.is_connected = False
+
+        # Cancel playback task
+        if self._playback_task:
+            self._playback_task.cancel()
+            self._playback_task = None
 
         # Attempt to reconnect with exponential backoff
         await self._attempt_reconnect()
@@ -216,7 +318,19 @@ class VoiceChat:
         Args:
             audio_chunk: PCM audio bytes (16-bit, 48kHz, mono)
         """
-        self.output_buffer.append(audio_chunk)
+        # Split into appropriate chunk sizes for send_frame
+        # Each chunk should be ~10ms of audio
+        offset = 0
+        while offset < len(audio_chunk):
+            chunk = audio_chunk[offset:offset + CHUNK_SIZE]
+
+            # Pad if necessary (last chunk might be smaller)
+            if len(chunk) < CHUNK_SIZE:
+                chunk = chunk + b'\x00' * (CHUNK_SIZE - len(chunk))
+
+            self.output_buffer.append(chunk)
+            offset += CHUNK_SIZE
+
         self.is_playing = True
 
     def clear_output_buffer(self):
@@ -231,187 +345,7 @@ class VoiceChat:
             if self.is_connected:
                 await self.leave_voice_chat()
 
-            logger.info("Stopping pytgcalls...")
-            # pytgcalls doesn't have a stop method, just leave all calls
+            logger.info("Voice chat handler stopped")
 
         except Exception as e:
             logger.error(f"Error stopping voice chat: {e}")
-
-
-class VoiceChatRaw:
-    """
-    Voice chat handler using lower-level GroupCallRaw for bidirectional audio.
-    This is the correct implementation that provides both input and output callbacks.
-    """
-
-    def __init__(self, client, pipeline):
-        """
-        Initialize voice chat handler with GroupCallRaw.
-
-        Args:
-            client: Pyrogram client instance
-            pipeline: VoicePipeline instance for processing audio
-        """
-        # Note: This requires py-tgcalls which provides GroupCallRaw
-        # We'll implement this using the correct import path
-        try:
-            from pytgcalls import GroupCallFactory
-            self.client = client
-            self.pipeline = pipeline
-
-            # Create GroupCallRaw instance
-            self.group_call = GroupCallFactory(client).get_raw_group_call(
-                on_played_data=self._on_played_data,
-                on_recorded_data=self._on_recorded_data
-            )
-
-            # Audio buffers
-            self.output_buffer = deque()  # Audio to play to the call
-
-            # State
-            self.is_connected = False
-            self.is_playing = False
-            self.reconnect_attempts = 0
-
-            # Configuration
-            self.group_id = config.VOICE_CHAT_GROUP_ID
-
-            logger.info("VoiceChatRaw initialized with GroupCallRaw")
-
-        except ImportError as e:
-            logger.error(f"Failed to import GroupCallFactory: {e}")
-            logger.error("Make sure py-tgcalls is installed correctly")
-            raise
-
-    def _on_recorded_data(self, group_call, data: bytes, length: int):
-        """
-        Callback when audio is received from the call.
-
-        Args:
-            group_call: GroupCall instance
-            data: PCM audio bytes (16-bit, 48kHz, mono)
-            length: Length of data in bytes
-        """
-        try:
-            # Convert Telegram audio (48kHz) to Whisper format (16kHz)
-            audio_16k = convert_telegram_to_whisper(data[:length])
-
-            # Send to pipeline for processing (VAD -> STT -> LLM -> TTS)
-            asyncio.create_task(self.pipeline.process_input_audio(audio_16k))
-
-        except Exception as e:
-            logger.error(f"Error processing recorded data: {e}")
-
-    def _on_played_data(self, group_call, length: int) -> bytes:
-        """
-        Callback when audio is needed for playback.
-
-        Args:
-            group_call: GroupCall instance
-            length: Number of bytes needed
-
-        Returns:
-            PCM audio bytes (16-bit, 48kHz, mono)
-        """
-        try:
-            if self.output_buffer:
-                # Return audio from buffer
-                chunk = self.output_buffer.popleft()
-
-                # Pad or truncate to requested length
-                if len(chunk) < length:
-                    chunk += generate_silence(
-                        duration_ms=int((length - len(chunk)) / 96),  # 48kHz 16-bit = 96 bytes/ms
-                        sample_rate=config.SAMPLE_RATE_TG
-                    )
-                elif len(chunk) > length:
-                    chunk = chunk[:length]
-
-                return chunk
-            else:
-                # Return silence
-                return generate_silence(
-                    duration_ms=int(length / 96),
-                    sample_rate=config.SAMPLE_RATE_TG
-                )
-
-        except Exception as e:
-            logger.error(f"Error generating played data: {e}")
-            return b'\x00' * length
-
-    async def join_voice_chat(self):
-        """Join the voice chat."""
-        try:
-            if self.is_connected:
-                logger.warning("Already connected to voice chat")
-                return
-
-            logger.info(f"Joining voice chat in group {self.group_id}...")
-
-            await self.group_call.start(self.group_id)
-
-            self.is_connected = True
-            self.reconnect_attempts = 0
-            logger.info("Successfully joined voice chat with GroupCallRaw")
-
-        except Exception as e:
-            logger.error(f"Failed to join voice chat: {e}")
-            await self._attempt_reconnect()
-
-    async def leave_voice_chat(self):
-        """Leave the voice chat."""
-        try:
-            if not self.is_connected:
-                return
-
-            logger.info("Leaving voice chat...")
-
-            await self.group_call.stop()
-
-            self.is_connected = False
-            self.output_buffer.clear()
-            logger.info("Left voice chat")
-
-        except Exception as e:
-            logger.error(f"Failed to leave voice chat: {e}")
-
-    async def play_audio(self, audio_chunk: bytes):
-        """
-        Queue audio for playback (48kHz PCM).
-
-        Args:
-            audio_chunk: PCM audio bytes (16-bit, 48kHz, mono)
-        """
-        self.output_buffer.append(audio_chunk)
-        self.is_playing = True
-
-    def clear_output_buffer(self):
-        """Clear output buffer (interruption)."""
-        logger.info("Clearing output buffer")
-        self.output_buffer.clear()
-        self.is_playing = False
-
-    async def _attempt_reconnect(self):
-        """Reconnect with exponential backoff."""
-        if self.reconnect_attempts >= 10:
-            logger.error("Max reconnect attempts reached")
-            return
-
-        delay = min(
-            config.AUTO_REJOIN_BACKOFF_BASE ** self.reconnect_attempts,
-            config.AUTO_REJOIN_MAX_DELAY
-        )
-        self.reconnect_attempts += 1
-
-        logger.info(f"Reconnecting in {delay}s (attempt {self.reconnect_attempts})...")
-        await asyncio.sleep(delay)
-
-        try:
-            await self.join_voice_chat()
-        except Exception as e:
-            logger.error(f"Reconnect failed: {e}")
-            await self._attempt_reconnect()
-
-    async def stop(self):
-        """Stop voice chat handler."""
-        await self.leave_voice_chat()

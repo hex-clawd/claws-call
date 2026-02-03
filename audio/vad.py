@@ -40,7 +40,7 @@ class VAD:
             self.is_speech = False
             self.silence_frames = 0
             self.speech_frames = 0
-            self.frame_duration_ms = 30  # Silero VAD works with 30ms frames
+            self.frame_duration_ms = 50  # Using 50ms frames for safety margin (Silero needs min 32ms)
 
             logger.info(f"Silero VAD initialized successfully")
             logger.info(f"Config: threshold={self.threshold}, silence={self.silence_threshold_ms}ms, min_speech={self.min_speech_duration_ms}ms")

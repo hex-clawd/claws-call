@@ -6,6 +6,15 @@ Entry point for the voice assistant bot.
 Supports both Phase 1 (voice messages) and Phase 2 (real-time voice chat).
 """
 
+# Monkey-patch pyrogram.errors for pytgcalls compatibility
+# pytgcalls expects GroupcallForbidden which doesn't exist in pyrofork
+def _patch_pyrogram_errors():
+    import pyrogram.errors
+    class GroupcallForbidden(Exception):
+        pass
+    pyrogram.errors.GroupcallForbidden = GroupcallForbidden
+_patch_pyrogram_errors()
+
 import logging
 import sys
 import asyncio
@@ -28,7 +37,7 @@ def setup_logging():
 async def run_voice_chat_mode():
     """Run in voice chat mode (Phase 2)."""
     from pyrogram import Client
-    from bot.voice_chat import VoiceChatRaw
+    from bot.voice_chat import VoiceChat
     from pipeline.voice_pipeline import VoicePipeline
 
     logger = logging.getLogger(__name__)
@@ -51,7 +60,7 @@ async def run_voice_chat_mode():
         pipeline = None
 
         # Create voice chat handler
-        voice_chat = VoiceChatRaw(app, None)  # Pipeline will be set later
+        voice_chat = VoiceChat(app, None)  # Pipeline will be set later
 
         # Create pipeline with voice chat handler
         pipeline = VoicePipeline(voice_chat)

@@ -9,7 +9,7 @@ from audio.vad import VAD
 from audio.stt import STT
 from audio.tts import TTS
 from audio.utils import convert_whisper_to_telegram
-from llm.claude import ClaudeClient
+from llm.clawdbot import ClawdbotClient
 import config
 
 logger = logging.getLogger(__name__)
@@ -34,12 +34,17 @@ class VoicePipeline:
         self.vad = VAD()
         self.stt = STT()
         self.tts = TTS()
-        self.claude = ClaudeClient()
+        self.claude = ClawdbotClient()
         self.voice_chat = voice_chat_handler
 
         # Audio buffers
         self.input_audio_buffer = deque()  # Buffer for incoming audio chunks (16kHz float32)
         self.stt_buffer = []  # Accumulated audio for STT when turn is detected
+        
+        # Silero VAD requires EXACTLY 512 samples at 16kHz (32ms).
+        # Buffer small incoming chunks until we have enough for VAD.
+        self.vad_accumulator = []  # Accumulates audio until we have enough for VAD
+        self.vad_chunk_samples = 512  # Silero VAD requires exactly 512 samples at 16kHz (32ms)
 
         # State
         self.is_processing = False  # Is AI currently generating a response
@@ -48,10 +53,11 @@ class VoicePipeline:
         self.llm_task: Optional[asyncio.Task] = None  # Current LLM task
         self.tts_task: Optional[asyncio.Task] = None  # Current TTS task
 
-        # Configuration
-        self.vad_chunk_size = int(config.SAMPLE_RATE_WHISPER * 0.03)  # 30ms chunks for VAD
+        # Debug counters
+        self._input_frame_count = 0
+        self._vad_call_count = 0
 
-        logger.info("VoicePipeline initialized")
+        logger.info(f"VoicePipeline initialized (VAD chunk: {self.vad_chunk_samples} samples = 32ms)")
 
     async def start(self):
         """Start the pipeline processing loop."""
@@ -73,25 +79,60 @@ class VoicePipeline:
                     await asyncio.sleep(0.01)
                     continue
 
-                # Get audio chunk
+                # Get audio chunk and add to VAD accumulator
                 audio_chunk = self.input_audio_buffer.popleft()
+                self._input_frame_count += 1
+                
+                # Log first few frames for debugging
+                if self._input_frame_count <= 3:
+                    logger.info(f"Input frame #{self._input_frame_count}: {len(audio_chunk)} samples (16kHz)")
+                
+                self.vad_accumulator.append(audio_chunk)
+                
+                # Calculate total accumulated samples
+                total_samples = sum(len(chunk) for chunk in self.vad_accumulator)
+                
+                # Only process when we have exactly 512 samples for VAD (32ms at 16kHz)
+                if total_samples < self.vad_chunk_samples:
+                    if self._input_frame_count <= 5:
+                        logger.debug(f"Accumulating: {total_samples}/{self.vad_chunk_samples} samples")
+                    continue
+                
+                # Concatenate accumulated audio into a proper VAD chunk
+                accumulated_audio = np.concatenate(self.vad_accumulator)
+                
+                # Process in vad_chunk_samples (512 samples = 32ms) chunks
+                offset = 0
+                while offset + self.vad_chunk_samples <= len(accumulated_audio):
+                    vad_chunk = accumulated_audio[offset:offset + self.vad_chunk_samples]
+                    offset += self.vad_chunk_samples
+                    
+                    self._vad_call_count += 1
+                    if self._vad_call_count <= 3:
+                        logger.info(f"VAD call #{self._vad_call_count}: {len(vad_chunk)} samples")
+                    
+                    # Process through VAD
+                    is_speech, turn_ended = self.vad.update_state(vad_chunk)
 
-                # Process through VAD
-                is_speech, turn_ended = self.vad.update_state(audio_chunk)
+                    if is_speech:
+                        # Check for interruption
+                        if self.is_speaking:
+                            logger.info("INTERRUPTION DETECTED: User speaking while AI is talking")
+                            await self._handle_interruption()
 
-                if is_speech:
-                    # Check for interruption
-                    if self.is_speaking:
-                        logger.info("INTERRUPTION DETECTED: User speaking while AI is talking")
-                        await self._handle_interruption()
+                        # Accumulate audio for STT
+                        self.stt_buffer.append(vad_chunk)
 
-                    # Accumulate audio for STT
-                    self.stt_buffer.append(audio_chunk)
-
-                elif turn_ended:
-                    # User finished speaking, process the turn
-                    if self.stt_buffer:
-                        await self._process_user_turn()
+                    elif turn_ended:
+                        # User finished speaking, process the turn
+                        if self.stt_buffer:
+                            await self._process_user_turn()
+                
+                # Keep remainder for next iteration
+                if offset < len(accumulated_audio):
+                    self.vad_accumulator = [accumulated_audio[offset:]]
+                else:
+                    self.vad_accumulator = []
 
         except asyncio.CancelledError:
             logger.info("Processing loop cancelled")
@@ -132,8 +173,9 @@ class VoicePipeline:
         # Reset VAD state
         self.vad.reset()
 
-        # Clear STT buffer
+        # Clear STT buffer and VAD accumulator
         self.stt_buffer.clear()
+        self.vad_accumulator.clear()
 
         logger.info("Interruption handled")
 
@@ -223,13 +265,8 @@ class VoicePipeline:
         try:
             logger.info("Generating LLM response...")
 
-            # For Phase 2, we'll use non-streaming Claude for simplicity
-            # Streaming can be added in Phase 3 optimization
-            response_text = await asyncio.get_event_loop().run_in_executor(
-                None,
-                self.claude.get_response,
-                user_text
-            )
+            # Get response from Clawdbot (async method)
+            response_text = await self.claude.get_response(user_text)
 
             logger.info(f"LLM response: {response_text}")
 
@@ -303,22 +340,23 @@ class VoicePipeline:
         # Clear buffers
         self.input_audio_buffer.clear()
         self.stt_buffer.clear()
+        self.vad_accumulator.clear()
 
         logger.info("Voice pipeline stopped")
 
 
-class StreamingClaudeClient:
+class StreamingClawdbotClient:
     """
     Streaming version of Claude client (for future optimization).
     This allows sentence-by-sentence TTS generation.
     """
 
-    def __init__(self, claude_client: ClaudeClient):
+    def __init__(self, claude_client: ClawdbotClient):
         """
         Initialize streaming Claude client.
 
         Args:
-            claude_client: Base ClaudeClient instance
+            claude_client: Base ClawdbotClient instance
         """
         self.client = claude_client.client
         self.conversation_history = claude_client.conversation_history

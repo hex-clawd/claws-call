@@ -101,19 +101,28 @@ def float32_to_pcm_bytes(audio: np.ndarray, sample_width: int = 2) -> bytes:
         raise
 
 
-def convert_telegram_to_whisper(pcm_48k_bytes: bytes) -> np.ndarray:
+def convert_telegram_to_whisper(pcm_48k_bytes: bytes, stereo: bool = True) -> np.ndarray:
     """
     Convert Telegram audio (48kHz PCM) to Whisper format (16kHz float32).
 
     Args:
-        pcm_48k_bytes: Raw PCM bytes from Telegram (16-bit, 48kHz, mono)
+        pcm_48k_bytes: Raw PCM bytes from Telegram (16-bit, 48kHz)
+        stereo: If True, input is stereo and will be converted to mono
 
     Returns:
-        Audio as float32 numpy array (16kHz, normalized)
+        Audio as float32 numpy array (16kHz, normalized, mono)
     """
     try:
         # Convert bytes to float32
         audio_float = pcm_bytes_to_float32(pcm_48k_bytes, sample_width=2)
+
+        # Convert stereo to mono if needed (pytgcalls sends stereo by default)
+        if stereo and len(audio_float) >= 2:
+            # Interleaved stereo: [L0, R0, L1, R1, ...] -> average channels
+            left = audio_float[0::2]
+            right = audio_float[1::2]
+            audio_float = (left + right) / 2.0
+            logger.debug(f"Converted stereo to mono: {len(left)} samples per channel")
 
         # Resample 48kHz -> 16kHz
         audio_16k = resample_audio(

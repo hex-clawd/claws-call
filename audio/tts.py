@@ -2,14 +2,9 @@
 
 import logging
 import asyncio
-from pathlib import Path
 from typing import AsyncGenerator
 import edge_tts
-import numpy as np
-import soundfile as sf
-import io
 import config
-from audio.utils import resample_audio, pcm_bytes_to_float32, float32_to_pcm_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +56,44 @@ class TTS:
         """
         return asyncio.run(self.generate_async(text, output_path))
 
+    async def _decode_mp3_to_pcm(self, mp3_data: bytes, target_sample_rate: int) -> bytes:
+        """
+        Decode MP3 data to raw PCM using ffmpeg.
+        
+        Args:
+            mp3_data: Raw MP3 bytes
+            target_sample_rate: Target sample rate for output PCM
+            
+        Returns:
+            Raw PCM bytes (16-bit, mono)
+        """
+        # Use ffmpeg to decode MP3 from stdin to raw PCM on stdout
+        cmd = [
+            'ffmpeg',
+            '-i', 'pipe:0',           # Read from stdin
+            '-f', 's16le',            # Output format: signed 16-bit little-endian
+            '-acodec', 'pcm_s16le',   # PCM codec
+            '-ac', '1',               # Mono
+            '-ar', str(target_sample_rate),  # Target sample rate
+            '-loglevel', 'error',     # Suppress verbose output
+            'pipe:1'                  # Write to stdout
+        ]
+        
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        pcm_data, stderr = await proc.communicate(input=mp3_data)
+        
+        if proc.returncode != 0:
+            logger.error(f"ffmpeg decode failed: {stderr.decode()}")
+            raise RuntimeError(f"ffmpeg decode failed: {stderr.decode()}")
+        
+        return pcm_data
+
     async def stream_audio_chunks(self, text: str, chunk_size: int = 4096) -> AsyncGenerator[bytes, None]:
         """
         Stream TTS audio as raw PCM chunks (16kHz, 16-bit, mono).
@@ -78,44 +111,25 @@ class TTS:
             # Create Edge TTS communicator
             communicate = edge_tts.Communicate(text, self.voice)
 
-            # Buffer to accumulate audio
-            audio_buffer = bytearray()
+            # Collect all MP3 data first (Edge TTS sends partial MP3 frames)
+            mp3_buffer = bytearray()
 
-            # Stream audio chunks from Edge TTS
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
-                    # Edge TTS returns MP3 audio data
-                    audio_data = chunk["data"]
+                    mp3_buffer.extend(chunk["data"])
 
-                    # Decode MP3 to PCM using soundfile
-                    # Edge TTS uses 24kHz by default
-                    try:
-                        audio_float, sr = sf.read(io.BytesIO(audio_data))
+            if not mp3_buffer:
+                logger.warning("No audio data received from TTS")
+                return
 
-                        # Resample to 16kHz if needed
-                        if sr != config.SAMPLE_RATE_WHISPER:
-                            audio_float = resample_audio(
-                                audio_float,
-                                orig_sr=sr,
-                                target_sr=config.SAMPLE_RATE_WHISPER
-                            )
+            # Decode MP3 to PCM using ffmpeg
+            pcm_data = await self._decode_mp3_to_pcm(bytes(mp3_buffer), config.SAMPLE_RATE_WHISPER)
 
-                        # Convert to PCM bytes
-                        pcm_chunk = float32_to_pcm_bytes(audio_float, sample_width=2)
-                        audio_buffer.extend(pcm_chunk)
-
-                        # Yield complete chunks
-                        while len(audio_buffer) >= chunk_size:
-                            yield bytes(audio_buffer[:chunk_size])
-                            audio_buffer = audio_buffer[chunk_size:]
-
-                    except Exception as e:
-                        logger.error(f"Failed to decode MP3 chunk: {e}")
-                        continue
-
-            # Yield remaining audio
-            if audio_buffer:
-                yield bytes(audio_buffer)
+            # Stream in chunks
+            offset = 0
+            while offset < len(pcm_data):
+                yield pcm_data[offset:offset + chunk_size]
+                offset += chunk_size
 
             logger.info("TTS streaming completed")
 
@@ -123,62 +137,54 @@ class TTS:
             logger.error(f"TTS streaming failed: {e}")
             raise
 
-    async def stream_audio_for_telegram(self, text: str, chunk_size: int = 3840) -> AsyncGenerator[bytes, None]:
+    async def stream_audio_for_telegram(self, text: str, chunk_size: int = 480) -> AsyncGenerator[bytes, None]:
         """
-        Stream TTS audio as PCM chunks for Telegram (48kHz, 16-bit, mono).
+        Stream TTS audio as PCM chunks for Telegram voice chat (24kHz, 16-bit, mono).
+
+        IMPORTANT: pytgcalls/ntgcalls send_frame() expects 24kHz audio for external sources.
+        Using 48kHz results in chipmunk (2x speed) playback.
 
         Args:
             text: Text to convert to speech
-            chunk_size: Size of each audio chunk in bytes (default 3840 = 20ms at 48kHz)
+            chunk_size: Size of each audio chunk in bytes (default 480 = 10ms at 24kHz mono)
 
         Yields:
-            Raw PCM audio chunks (16-bit, 48kHz, mono) ready for Telegram
+            Raw PCM audio chunks (16-bit, 24kHz, mono) ready for voice chat
         """
         try:
-            logger.info(f"Streaming TTS for Telegram: {text[:100]}...")
+            logger.info(f"Streaming TTS for voice chat: {text[:100]}...")
 
             # Create Edge TTS communicator
             communicate = edge_tts.Communicate(text, self.voice)
 
-            # Buffer to accumulate audio
-            audio_buffer = bytearray()
+            # Edge TTS sends MP3 chunks that can't be decoded individually.
+            # We need to collect all MP3 data first, then decode.
+            mp3_buffer = bytearray()
 
-            # Stream audio chunks from Edge TTS
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
-                    # Edge TTS returns MP3 audio data
-                    audio_data = chunk["data"]
+                    mp3_buffer.extend(chunk["data"])
 
-                    # Decode MP3 to PCM using soundfile
-                    try:
-                        audio_float, sr = sf.read(io.BytesIO(audio_data))
+            if not mp3_buffer:
+                logger.warning("No audio data received from TTS")
+                return
 
-                        # Resample to 48kHz for Telegram
-                        if sr != config.SAMPLE_RATE_TG:
-                            audio_float = resample_audio(
-                                audio_float,
-                                orig_sr=sr,
-                                target_sr=config.SAMPLE_RATE_TG
-                            )
+            # Decode MP3 to PCM using ffmpeg at 24kHz for voice chat playback
+            # ntgcalls send_frame() expects 24kHz, not 48kHz!
+            pcm_data = await self._decode_mp3_to_pcm(bytes(mp3_buffer), config.SAMPLE_RATE_EXTERNAL)
+            logger.info(f"TTS audio decoded: {len(pcm_data)} bytes at {config.SAMPLE_RATE_EXTERNAL}Hz")
 
-                        # Convert to PCM bytes
-                        pcm_chunk = float32_to_pcm_bytes(audio_float, sample_width=2)
-                        audio_buffer.extend(pcm_chunk)
+            # Stream in chunks (480 bytes = 10ms at 24kHz mono)
+            offset = 0
+            while offset < len(pcm_data):
+                chunk = pcm_data[offset:offset + chunk_size]
+                # Pad last chunk if needed
+                if len(chunk) < chunk_size:
+                    chunk = chunk + b'\x00' * (chunk_size - len(chunk))
+                yield chunk
+                offset += chunk_size
 
-                        # Yield complete chunks
-                        while len(audio_buffer) >= chunk_size:
-                            yield bytes(audio_buffer[:chunk_size])
-                            audio_buffer = audio_buffer[chunk_size:]
-
-                    except Exception as e:
-                        logger.error(f"Failed to decode MP3 chunk: {e}")
-                        continue
-
-            # Yield remaining audio
-            if audio_buffer:
-                yield bytes(audio_buffer)
-
-            logger.info("TTS streaming for Telegram completed")
+            logger.info("TTS streaming for voice chat completed")
 
         except Exception as e:
             logger.error(f"TTS streaming failed: {e}")

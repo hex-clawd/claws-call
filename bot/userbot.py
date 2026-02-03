@@ -4,10 +4,11 @@ import logging
 from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.enums import ChatAction
 import config
 from audio.stt import STT
 from audio.tts import TTS
-from llm.claude import ClaudeClient
+from llm.clawdbot import ClawdbotClient
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class VoiceBot:
         # Initialize components
         self.stt = STT()
         self.tts = TTS()
-        self.claude = ClaudeClient()
+        self.clawdbot = ClawdbotClient()
 
         # Register handlers
         self.app.on_message(
@@ -36,11 +37,12 @@ class VoiceBot:
 
         logger.info("VoiceBot initialized")
 
-    def _is_authorized(self, _, __, message: Message) -> bool:
+    def _is_authorized(self, client, message: Message) -> bool:
         """
         Security filter: only process messages from authorized user.
 
         Args:
+            client: Pyrogram client
             message: The incoming message
 
         Returns:
@@ -63,14 +65,14 @@ class VoiceBot:
             logger.info(f"Received voice message from user {message.from_user.id}")
 
             # Send typing indicator
-            await client.send_chat_action(message.chat.id, "typing")
+            await client.send_chat_action(message.chat.id, ChatAction.TYPING)
 
             # Download voice message
             voice_file = await message.download()
             logger.info(f"Voice message downloaded: {voice_file}")
 
             # Transcribe audio
-            await client.send_chat_action(message.chat.id, "typing")
+            await client.send_chat_action(message.chat.id, ChatAction.TYPING)
             transcription = self.stt.transcribe(voice_file)
             logger.info(f"Transcription: {transcription}")
 
@@ -78,18 +80,18 @@ class VoiceBot:
                 await message.reply_text("Sorry, I couldn't understand that.")
                 return
 
-            # Get response from Claude
-            await client.send_chat_action(message.chat.id, "typing")
-            response_text = self.claude.get_response(transcription)
-            logger.info(f"Claude response: {response_text}")
+            # Get response from Hex via Clawdbot Gateway
+            await client.send_chat_action(message.chat.id, ChatAction.TYPING)
+            response_text = await self.clawdbot.get_response(transcription)
+            logger.info(f"Hex response: {response_text}")
 
             # Generate TTS
-            await client.send_chat_action(message.chat.id, "record_audio")
+            await client.send_chat_action(message.chat.id, ChatAction.RECORD_AUDIO)
             tts_output = Path("temp_response.mp3")
-            self.tts.generate(response_text, str(tts_output))
+            await self.tts.generate_async(response_text, str(tts_output))
 
             # Send voice message reply
-            await client.send_chat_action(message.chat.id, "upload_audio")
+            await client.send_chat_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
             await message.reply_voice(
                 voice=str(tts_output),
                 caption=response_text

@@ -15,8 +15,7 @@ PHONE_NUMBER = os.getenv("PHONE_NUMBER", "")
 # Security
 AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "0"))
 
-# Claude API
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+# Claude API (not used when routing through Clawdbot gateway)
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
 
 # Edge TTS
@@ -27,8 +26,9 @@ EDGE_TTS_LANGUAGE = os.getenv("EDGE_TTS_LANGUAGE", "en-GB")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small.en")
 
 # Audio settings
-SAMPLE_RATE_TG = 48000  # Telegram voice message sample rate
+SAMPLE_RATE_TG = 48000  # Telegram voice message sample rate (incoming audio)
 SAMPLE_RATE_WHISPER = 16000  # Whisper expects 16kHz
+SAMPLE_RATE_EXTERNAL = 24000  # External source playback rate (ntgcalls expects 24kHz for send_frame)
 
 # Voice chat settings
 VOICE_CHAT_GROUP_ID = int(os.getenv("VOICE_CHAT_GROUP_ID", "0"))  # Private group ID for voice chat
@@ -57,8 +57,6 @@ def validate_config():
         errors.append("PHONE_NUMBER not set")
     if AUTHORIZED_USER_ID == 0:
         errors.append("AUTHORIZED_USER_ID not set")
-    if not ANTHROPIC_API_KEY:
-        errors.append("ANTHROPIC_API_KEY not set")
     if BOT_MODE == "voice_chat" and VOICE_CHAT_GROUP_ID == 0:
         errors.append("VOICE_CHAT_GROUP_ID not set (required for voice_chat mode)")
 
