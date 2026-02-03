@@ -35,11 +35,11 @@
 ### Phase 3: Polish 🔧
 - [x] Interruption handling
 - [x] Markdown stripping
-- [ ] **Streaming LLM → TTS** (end goal for low latency)
+- [x] **Streaming LLM → TTS** (sentence-level streaming for low latency)
 - [x] Auto-join when user starts call (not bot-initiated)
 - [x] Buffer drain before done (no more cut-off endings)
 - [x] Increased VAD silence threshold (1500ms for natural pauses)
-- [ ] Latency optimization (<2.5s target)
+- [ ] Latency optimization (<2.5s target) - streaming approach should help
 - [ ] Error recovery, reconnection logic
 
 ---
@@ -157,39 +157,40 @@ PIPER_MODEL_PATH=~/models/piper/en_US-lessac-medium.onnx
 
 ## Implementation Details
 
-### Audio Flow (Phase 2)
+### Audio Flow (Phase 3 - Streaming)
 ```python
-# pseudocode
-async def on_recorded_data(call, pcm_48k: bytes):
-    # 1. Resample 48k → 16k
-    pcm_16k = resample(pcm_48k, 48000, 16000)
+# pseudocode - Sentence-level streaming for low latency
+async def handle_user_turn(user_text: str):
+    # Stream tokens, accumulate into sentences
+    sentence_buffer = ""
+    tts_queue = asyncio.Queue()
+    
+    # Start TTS consumer (runs concurrently)
+    tts_consumer = asyncio.create_task(consume_tts(tts_queue))
+    
+    async for chunk in claude.stream_response(user_text):
+        sentence_buffer += chunk
+        
+        # Check for sentence boundaries (. ! ? \n)
+        if sentence_complete(sentence_buffer):
+            sentence, sentence_buffer = extract_sentence(sentence_buffer)
+            await tts_queue.put(sentence)  # TTS starts immediately!
+    
+    # Handle remaining text
+    if sentence_buffer:
+        await tts_queue.put(sentence_buffer)
+    
+    await tts_consumer
 
-    # 2. VAD check
-    is_speech = vad.check(pcm_16k)
-
-    if is_speech and ai_is_speaking:
-        # INTERRUPT: clear TTS buffer, stop playback
-        interrupt()
-
-    if is_speech:
-        stt_buffer.append(pcm_16k)
-    elif stt_buffer and silence_duration > 0.7:
-        # Turn complete
-        text = await stt.transcribe(stt_buffer)
-        await handle_user_turn(text)
-
-async def on_played_data(call, length: int) -> bytes:
-    if tts_buffer:
-        chunk = tts_buffer.popleft()
-        # Resample 16k → 48k if needed
-        return resample(chunk, 16000, 48000)
-    return b'\x00' * length  # silence
-
-async def handle_user_turn(text: str):
-    async for llm_chunk in claude.stream(text):
-        async for audio_chunk in edge_tts.stream(llm_chunk):
-            tts_buffer.append(audio_chunk)
+async def consume_tts(queue):
+    # Generate TTS per-sentence, queue audio chunks
+    while sentence := await queue.get():
+        async for audio_chunk in edge_tts.stream(sentence):
+            output_buffer.append(audio_chunk)  # Plays while next sentence generates
 ```
+
+**Key insight:** Audio for sentence 1 plays while TTS for sentence 2+ is still generating.
+Edge TTS requires full MP3 before decode, but per-sentence generation overlaps with playback.
 
 ### Key Async Patterns
 - `asyncio.Queue` for audio buffers
