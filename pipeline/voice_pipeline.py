@@ -110,8 +110,7 @@ class VoicePipeline:
         self.is_processing = False  # Is AI currently generating a response
         self.is_speaking = False  # Is AI currently playing TTS
         self.interrupted = asyncio.Event()  # Interruption signal
-        self.llm_task: Optional[asyncio.Task] = None  # Current LLM task
-        self.tts_task: Optional[asyncio.Task] = None  # Current TTS task
+        self.llm_task: Optional[asyncio.Task] = None  # Current LLM+TTS task (TTS is awaited inside)
 
         # Debug counters
         self._input_frame_count = 0
@@ -175,12 +174,16 @@ class VoicePipeline:
                     is_speech, turn_ended = self.vad.update_state(vad_chunk)
 
                     if is_speech:
-                        # Check for interruption
+                        # Check for interruption - user speaking while bot is talking
                         if self.is_speaking:
-                            logger.info("INTERRUPTION DETECTED: User speaking while AI is talking")
+                            logger.info("!" * 50)
+                            logger.info("INTERRUPTION DETECTED!")
+                            logger.info(f"  is_speaking={self.is_speaking}")
+                            logger.info(f"  output_buffer={len(self.voice_chat.output_buffer)} chunks")
+                            logger.info("!" * 50)
                             await self._handle_interruption()
 
-                        # Accumulate audio for STT
+                        # Accumulate audio for STT (including the interrupting speech)
                         self.stt_buffer.append(vad_chunk)
 
                     elif turn_ended:
@@ -201,43 +204,43 @@ class VoicePipeline:
 
     async def _handle_interruption(self):
         """Handle user interruption of AI speech."""
-        logger.info("Handling interruption...")
+        logger.info("=" * 50)
+        logger.info("INTERRUPTION: Starting interruption handling")
+        logger.info(f"  is_speaking={self.is_speaking}, is_processing={self.is_processing}")
+        logger.info(f"  llm_task={self.llm_task}, done={self.llm_task.done() if self.llm_task else 'N/A'}")
+        logger.info(f"  output_buffer_size={len(self.voice_chat.output_buffer)}")
 
-        # Set interruption flag
+        # Set interruption flag FIRST - TTS checks this during streaming
         self.interrupted.set()
+        logger.info("INTERRUPTION: Flag set")
 
-        # Clear TTS output buffer
+        # Clear TTS output buffer immediately - stops playback
         self.voice_chat.clear_output_buffer()
+        logger.info("INTERRUPTION: Output buffer cleared")
+        
         self.is_speaking = False
 
-        # Cancel ongoing LLM generation
+        # Cancel ongoing LLM generation (which includes TTS since it's awaited inside)
         if self.llm_task and not self.llm_task.done():
-            logger.info("Cancelling LLM generation")
+            logger.info("INTERRUPTION: Cancelling LLM task...")
             self.llm_task.cancel()
             try:
                 await self.llm_task
             except asyncio.CancelledError:
-                pass
-
-        # Cancel ongoing TTS generation
-        if self.tts_task and not self.tts_task.done():
-            logger.info("Cancelling TTS generation")
-            self.tts_task.cancel()
-            try:
-                await self.tts_task
-            except asyncio.CancelledError:
-                pass
+                logger.info("INTERRUPTION: LLM task cancelled successfully")
 
         self.is_processing = False
 
-        # Reset VAD state
+        # Reset VAD state to avoid detecting the same speech again
         self.vad.reset()
 
         # Clear STT buffer and VAD accumulator
+        # NOTE: New speech will be accumulated fresh after this
         self.stt_buffer.clear()
         self.vad_accumulator.clear()
 
-        logger.info("Interruption handled")
+        logger.info("INTERRUPTION: Complete - ready for new input")
+        logger.info("=" * 50)
 
     async def _process_user_turn(self):
         """Process a complete user turn (speech -> STT -> LLM -> TTS)."""
@@ -247,40 +250,46 @@ class VoicePipeline:
                 return
 
             self.is_processing = True
-            self.interrupted.clear()
+            self.interrupted.clear()  # Clear any previous interruption
+            logger.info("-" * 40)
+            logger.info("NEW TURN: Starting user turn processing")
 
             # Concatenate buffered audio
             full_audio = np.concatenate(self.stt_buffer)
             self.stt_buffer.clear()
 
-            logger.info(f"Processing user turn: {len(full_audio)} samples ({len(full_audio)/config.SAMPLE_RATE_WHISPER:.2f}s)")
+            duration_sec = len(full_audio) / config.SAMPLE_RATE_WHISPER
+            logger.info(f"NEW TURN: Audio collected: {len(full_audio)} samples ({duration_sec:.2f}s)")
 
             # Transcribe audio
             transcription = await self._transcribe_audio(full_audio)
 
             if not transcription or len(transcription.strip()) == 0:
-                logger.info("Empty transcription, ignoring")
+                logger.info("NEW TURN: Empty transcription, ignoring")
                 self.is_processing = False
                 return
 
-            logger.info(f"Transcription: {transcription}")
+            logger.info(f"NEW TURN: Transcription: '{transcription}'")
 
             # Check for interruption before proceeding
             if self.interrupted.is_set():
-                logger.info("Interrupted before LLM, aborting")
+                logger.info("NEW TURN: Interrupted before LLM, aborting")
                 self.is_processing = False
                 return
 
             # Get LLM response and generate TTS
+            logger.info("NEW TURN: Starting LLM+TTS task")
             self.llm_task = asyncio.create_task(self._generate_and_speak_response(transcription))
             await self.llm_task
+            logger.info("NEW TURN: Complete")
 
         except asyncio.CancelledError:
-            logger.info("User turn processing cancelled")
+            logger.info("NEW TURN: Cancelled")
         except Exception as e:
-            logger.error(f"Error processing user turn: {e}", exc_info=True)
+            logger.error(f"NEW TURN: Error: {e}", exc_info=True)
         finally:
             self.is_processing = False
+            logger.info("-" * 40)
 
     async def _transcribe_audio(self, audio: np.ndarray) -> str:
         """
@@ -323,32 +332,34 @@ class VoicePipeline:
             user_text: User's transcribed text
         """
         try:
-            logger.info("Generating LLM response...")
+            logger.info(f"LLM request: '{user_text}'")
 
             # Get response from Clawdbot (async method)
             response_text = await self.claude.get_response(user_text)
 
-            logger.info(f"LLM response: {response_text}")
+            logger.info(f"LLM response ({len(response_text)} chars): {response_text[:100]}...")
 
-            # Check for interruption
+            # Check for interruption before TTS
             if self.interrupted.is_set():
-                logger.info("Interrupted after LLM, not speaking")
+                logger.info("INTERRUPTED: After LLM, before TTS - aborting")
                 return
 
             # Strip markdown for clean TTS output
             clean_text = strip_markdown(response_text)
-            logger.debug(f"Text for TTS (markdown stripped): {clean_text}")
+            if clean_text != response_text:
+                logger.debug(f"Markdown stripped: {len(response_text)} -> {len(clean_text)} chars")
 
             # Generate and play TTS
+            logger.info("Starting TTS playback (is_speaking=True)")
             self.is_speaking = True
             await self._speak_text(clean_text)
             self.is_speaking = False
-
-            logger.info("Response complete")
+            logger.info("TTS playback finished (is_speaking=False)")
 
         except asyncio.CancelledError:
-            logger.info("LLM response generation cancelled")
+            logger.info("CANCELLED: LLM/TTS task was cancelled")
             self.is_speaking = False
+            raise  # Re-raise to propagate
         except Exception as e:
             logger.error(f"Error generating response: {e}", exc_info=True)
             self.is_speaking = False
@@ -361,22 +372,25 @@ class VoicePipeline:
             text: Text to speak
         """
         try:
-            logger.info("Generating and playing TTS...")
+            logger.info(f"TTS starting: '{text[:50]}...' ({len(text)} chars)")
+            chunks_played = 0
 
-            # Stream TTS audio chunks
-            async for audio_chunk in self.tts.stream_audio_for_telegram(text):
-                # Check for interruption
+            # Stream TTS audio chunks - pass interrupted event for early exit
+            async for audio_chunk in self.tts.stream_audio_for_telegram(text, interrupted=self.interrupted):
+                # Double-check for interruption (TTS also checks internally now)
                 if self.interrupted.is_set():
-                    logger.info("TTS interrupted")
+                    logger.info(f"TTS interrupted after {chunks_played} chunks")
                     break
 
-                # Send to voice chat
+                # Send to voice chat output buffer
                 await self.voice_chat.play_audio(audio_chunk)
+                chunks_played += 1
 
-            logger.info("TTS playback complete")
+            logger.info(f"TTS complete: {chunks_played} chunks played")
 
         except asyncio.CancelledError:
-            logger.info("TTS playback cancelled")
+            logger.info(f"TTS cancelled after {chunks_played if 'chunks_played' in dir() else '?'} chunks")
+            raise  # Re-raise to propagate cancellation
         except Exception as e:
             logger.error(f"Error playing TTS: {e}", exc_info=True)
 

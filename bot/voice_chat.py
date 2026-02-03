@@ -335,9 +335,11 @@ class VoiceChat:
 
     def clear_output_buffer(self):
         """Clear the output audio buffer (for interruption handling)."""
-        logger.info("Clearing output audio buffer")
+        buffer_size = len(self.output_buffer)
+        logger.info(f"CLEAR BUFFER: Clearing {buffer_size} chunks from output buffer")
         self.output_buffer.clear()
         self.is_playing = False
+        logger.info("CLEAR BUFFER: Output buffer cleared, is_playing=False")
 
     async def stop(self):
         """Stop the voice chat handler."""

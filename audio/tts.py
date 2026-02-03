@@ -137,7 +137,12 @@ class TTS:
             logger.error(f"TTS streaming failed: {e}")
             raise
 
-    async def stream_audio_for_telegram(self, text: str, chunk_size: int = 480) -> AsyncGenerator[bytes, None]:
+    async def stream_audio_for_telegram(
+        self, 
+        text: str, 
+        chunk_size: int = 480,
+        interrupted: asyncio.Event = None
+    ) -> AsyncGenerator[bytes, None]:
         """
         Stream TTS audio as PCM chunks for Telegram voice chat (24kHz, 16-bit, mono).
 
@@ -147,6 +152,7 @@ class TTS:
         Args:
             text: Text to convert to speech
             chunk_size: Size of each audio chunk in bytes (default 480 = 10ms at 24kHz mono)
+            interrupted: Optional asyncio.Event to check for interruption during generation
 
         Yields:
             Raw PCM audio chunks (16-bit, 24kHz, mono) ready for voice chat
@@ -162,8 +168,18 @@ class TTS:
             mp3_buffer = bytearray()
 
             async for chunk in communicate.stream():
+                # Check for interruption during MP3 collection
+                if interrupted and interrupted.is_set():
+                    logger.info("TTS interrupted during MP3 collection")
+                    return
+                    
                 if chunk["type"] == "audio":
                     mp3_buffer.extend(chunk["data"])
+
+            # Check again before expensive decode operation
+            if interrupted and interrupted.is_set():
+                logger.info("TTS interrupted before decode")
+                return
 
             if not mp3_buffer:
                 logger.warning("No audio data received from TTS")
@@ -176,16 +192,26 @@ class TTS:
 
             # Stream in chunks (480 bytes = 10ms at 24kHz mono)
             offset = 0
+            chunks_yielded = 0
             while offset < len(pcm_data):
+                # Check for interruption during streaming
+                if interrupted and interrupted.is_set():
+                    logger.info(f"TTS interrupted after {chunks_yielded} chunks ({chunks_yielded * 10}ms)")
+                    return
+                    
                 chunk = pcm_data[offset:offset + chunk_size]
                 # Pad last chunk if needed
                 if len(chunk) < chunk_size:
                     chunk = chunk + b'\x00' * (chunk_size - len(chunk))
                 yield chunk
                 offset += chunk_size
+                chunks_yielded += 1
 
-            logger.info("TTS streaming for voice chat completed")
+            logger.info(f"TTS streaming completed: {chunks_yielded} chunks ({chunks_yielded * 10}ms)")
 
+        except asyncio.CancelledError:
+            logger.info("TTS streaming cancelled")
+            raise
         except Exception as e:
             logger.error(f"TTS streaming failed: {e}")
             raise
