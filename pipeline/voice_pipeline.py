@@ -383,15 +383,24 @@ class VoicePipeline:
             
             sentence_count = 0
             full_response = ""
+            last_chunk_len = 0  # Track cumulative length to extract only new text
             
             # Stream tokens and accumulate sentences
+            # NOTE: Clawdbot sends CUMULATIVE deltas (full response so far), not incremental
             async for chunk in self.claude.stream_response(user_text):
                 if self.interrupted.is_set():
                     logger.info("INTERRUPTED: During LLM streaming - aborting")
                     break
                 
-                full_response += chunk
-                sentence_buffer += chunk
+                # Extract only the NEW portion of the cumulative response
+                new_text = chunk[last_chunk_len:]
+                last_chunk_len = len(chunk)
+                
+                if not new_text:
+                    continue  # No new content in this delta
+                
+                full_response = chunk  # Store full cumulative response
+                sentence_buffer += new_text  # Only add NEW text to buffer
                 
                 # Check for sentence boundaries
                 # Look for sentence-ending punctuation followed by space or end
