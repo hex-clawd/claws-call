@@ -353,40 +353,118 @@ class VoicePipeline:
     async def _generate_and_speak_response(self, user_text: str):
         """
         Generate LLM response and speak it with TTS (streaming).
+        
+        Uses sentence-level streaming: as each sentence completes from LLM,
+        TTS generation starts immediately. Audio plays while later sentences
+        are still being generated.
 
         Args:
             user_text: User's transcribed text
         """
         try:
-            logger.info(f"LLM request: '{user_text}'")
-
-            # Get response from Clawdbot (async method)
-            response_text = await self.claude.get_response(user_text)
-
-            logger.info(f"LLM response ({len(response_text)} chars): {response_text[:100]}...")
-
-            # Check for interruption before TTS
-            if self.interrupted.is_set():
-                logger.info("INTERRUPTED: After LLM, before TTS - aborting")
-                return
-
-            # Strip markdown for clean TTS output
-            clean_text = strip_markdown(response_text)
-            if clean_text != response_text:
-                logger.debug(f"Markdown stripped: {len(response_text)} -> {len(clean_text)} chars")
-
-            # Generate and play TTS
-            # NOTE: is_speaking=True during TTS GENERATION, but playback continues after!
-            # Interruption detection also checks output_buffer for active playback
-            logger.info("🔊 TTS GENERATION STARTING (is_speaking=True)")
+            logger.info(f"LLM request (streaming): '{user_text}'")
+            
+            # State for sentence accumulation
+            sentence_buffer = ""
+            sentence_endings = {'.', '!', '?'}
+            # Also break on newlines and long pauses (indicated by multiple spaces or dashes)
+            
+            # TTS tasks queue - we generate TTS concurrently with LLM streaming
+            tts_queue = asyncio.Queue()
+            tts_done = asyncio.Event()
+            
+            # Start TTS consumer task
+            tts_consumer = asyncio.create_task(
+                self._tts_consumer(tts_queue, tts_done)
+            )
+            
             self.is_speaking = True
-            await self._speak_text(clean_text)
-            # Keep is_speaking True while buffer is draining
-            logger.info(f"🔊 TTS GENERATION DONE, buffer has {len(self.voice_chat.output_buffer)} chunks remaining")
-            # Wait briefly for buffer to drain, but set is_speaking=False
-            # Interruption check will still work because it also checks buffer
+            logger.info("🔊 STREAMING STARTED (is_speaking=True)")
+            
+            sentence_count = 0
+            full_response = ""
+            
+            # Stream tokens and accumulate sentences
+            async for chunk in self.claude.stream_response(user_text):
+                if self.interrupted.is_set():
+                    logger.info("INTERRUPTED: During LLM streaming - aborting")
+                    break
+                
+                full_response += chunk
+                sentence_buffer += chunk
+                
+                # Check for sentence boundaries
+                # Look for sentence-ending punctuation followed by space or end
+                while True:
+                    # Find earliest sentence ending
+                    earliest_end = -1
+                    for punct in sentence_endings:
+                        idx = sentence_buffer.find(punct)
+                        if idx != -1:
+                            # Check if followed by space, newline, or end of buffer
+                            if idx + 1 >= len(sentence_buffer) or sentence_buffer[idx + 1] in ' \n\t':
+                                if earliest_end == -1 or idx < earliest_end:
+                                    earliest_end = idx
+                    
+                    # Also check for newlines as sentence breaks
+                    newline_idx = sentence_buffer.find('\n')
+                    if newline_idx != -1 and (earliest_end == -1 or newline_idx < earliest_end):
+                        earliest_end = newline_idx
+                    
+                    if earliest_end == -1:
+                        break  # No complete sentence yet
+                    
+                    # Extract the sentence (include the punctuation)
+                    sentence = sentence_buffer[:earliest_end + 1].strip()
+                    sentence_buffer = sentence_buffer[earliest_end + 1:].lstrip()
+                    
+                    if sentence:
+                        sentence_count += 1
+                        # Strip markdown and queue for TTS
+                        clean_sentence = strip_markdown(sentence)
+                        if clean_sentence:
+                            logger.info(f"📝 Sentence {sentence_count}: '{clean_sentence[:50]}...'")
+                            await tts_queue.put(clean_sentence)
+            
+            # Handle remaining text as final sentence
+            remaining = sentence_buffer.strip()
+            if remaining and not self.interrupted.is_set():
+                clean_remaining = strip_markdown(remaining)
+                if clean_remaining:
+                    sentence_count += 1
+                    logger.info(f"📝 Final sentence {sentence_count}: '{clean_remaining[:50]}...'")
+                    await tts_queue.put(clean_remaining)
+            
+            # Signal TTS consumer that we're done adding sentences
+            tts_done.set()
+            
+            # Wait for TTS consumer to finish
+            if not self.interrupted.is_set():
+                await tts_consumer
+            else:
+                tts_consumer.cancel()
+                try:
+                    await tts_consumer
+                except asyncio.CancelledError:
+                    pass
+            
+            logger.info(f"🔊 STREAMING COMPLETE: {sentence_count} sentences, {len(full_response)} chars total")
+            logger.info(f"Full response: {full_response[:200]}...")
+            
+            # Wait for buffer to drain
+            if not self.interrupted.is_set():
+                drain_waited = 0
+                while len(self.voice_chat.output_buffer) > 0:
+                    if self.interrupted.is_set():
+                        logger.info(f"Buffer drain interrupted after {drain_waited} waits")
+                        break
+                    await asyncio.sleep(0.05)
+                    drain_waited += 1
+                if drain_waited > 0:
+                    logger.info(f"Buffer drained after {drain_waited * 50}ms")
+            
             self.is_speaking = False
-            logger.info("🔊 TTS generation finished (is_speaking=False, buffer may still be playing)")
+            logger.info("🔊 TTS complete (is_speaking=False)")
 
         except asyncio.CancelledError:
             logger.info("CANCELLED: LLM/TTS task was cancelled")
@@ -396,15 +474,56 @@ class VoicePipeline:
             logger.error(f"Error generating response: {e}", exc_info=True)
             self.is_speaking = False
 
-    async def _speak_text(self, text: str):
+    async def _tts_consumer(self, sentence_queue: asyncio.Queue, done_event: asyncio.Event):
         """
-        Generate TTS and play to voice chat (streaming).
-
+        Consume sentences from queue and generate/play TTS.
+        
+        Runs concurrently with LLM streaming - generates TTS for each sentence
+        as it becomes available.
+        
         Args:
-            text: Text to speak
+            sentence_queue: Queue of sentences to speak
+            done_event: Event signaling no more sentences will be added
         """
         try:
-            logger.info(f"TTS starting: '{text[:50]}...' ({len(text)} chars)")
+            while True:
+                # Check if we're done and queue is empty
+                if done_event.is_set() and sentence_queue.empty():
+                    break
+                
+                # Check for interruption
+                if self.interrupted.is_set():
+                    logger.info("TTS consumer interrupted")
+                    break
+                
+                # Try to get next sentence
+                try:
+                    sentence = await asyncio.wait_for(sentence_queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                
+                # Generate and play TTS for this sentence
+                if sentence and not self.interrupted.is_set():
+                    await self._speak_text(sentence)
+                
+        except asyncio.CancelledError:
+            logger.info("TTS consumer cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"TTS consumer error: {e}", exc_info=True)
+
+    async def _speak_text(self, text: str):
+        """
+        Generate TTS for a sentence and queue audio for playback.
+        
+        NOTE: Does NOT wait for buffer drain - that happens at the end of
+        full response generation to enable overlapping sentence TTS.
+
+        Args:
+            text: Text to speak (typically a single sentence)
+        """
+        try:
+            logger.info(f"TTS generating: '{text[:50]}...' ({len(text)} chars)")
             chunks_played = 0
 
             # Stream TTS audio chunks - pass interrupted event for early exit
@@ -418,20 +537,7 @@ class VoicePipeline:
                 await self.voice_chat.play_audio(audio_chunk)
                 chunks_played += 1
 
-            # Wait for buffer to drain before marking complete
-            # This ensures all audio plays before response is considered done
-            if not self.interrupted.is_set():
-                drain_waited = 0
-                while len(self.voice_chat.output_buffer) > 0:
-                    if self.interrupted.is_set():
-                        logger.info(f"Buffer drain interrupted after {drain_waited} waits")
-                        break
-                    await asyncio.sleep(0.05)
-                    drain_waited += 1
-                if drain_waited > 0:
-                    logger.info(f"Buffer drained after {drain_waited * 50}ms")
-
-            logger.info(f"TTS complete: {chunks_played} chunks played")
+            logger.info(f"TTS queued: {chunks_played} chunks for '{text[:30]}...'")
 
         except asyncio.CancelledError:
             logger.info(f"TTS cancelled after {chunks_played if 'chunks_played' in dir() else '?'} chunks")
@@ -457,84 +563,9 @@ class VoicePipeline:
         if self.llm_task and not self.llm_task.done():
             self.llm_task.cancel()
 
-        if self.tts_task and not self.tts_task.done():
-            self.tts_task.cancel()
-
         # Clear buffers
         self.input_audio_buffer.clear()
         self.stt_buffer.clear()
         self.vad_accumulator.clear()
 
         logger.info("Voice pipeline stopped")
-
-
-class StreamingClawdbotClient:
-    """
-    Streaming version of Claude client (for future optimization).
-    This allows sentence-by-sentence TTS generation.
-    """
-
-    def __init__(self, claude_client: ClawdbotClient):
-        """
-        Initialize streaming Claude client.
-
-        Args:
-            claude_client: Base ClawdbotClient instance
-        """
-        self.client = claude_client.client
-        self.conversation_history = claude_client.conversation_history
-
-    async def stream_response(self, user_message: str):
-        """
-        Stream Claude response sentence by sentence.
-
-        Args:
-            user_message: User's message
-
-        Yields:
-            Sentences from Claude's response
-        """
-        try:
-            # Add user message to history
-            self.conversation_history.append({
-                "role": "user",
-                "content": user_message
-            })
-
-            # Stream response from Claude
-            full_response = ""
-            current_sentence = ""
-
-            async with self.client.messages.stream(
-                model=config.CLAUDE_MODEL,
-                max_tokens=1024,
-                system="You are a helpful voice assistant. Keep your responses concise and conversational.",
-                messages=self.conversation_history
-            ) as stream:
-                async for text in stream.text_stream:
-                    full_response += text
-                    current_sentence += text
-
-                    # Check for sentence boundaries
-                    if any(punct in text for punct in ['.', '!', '?', '\n']):
-                        if current_sentence.strip():
-                            yield current_sentence.strip()
-                            current_sentence = ""
-
-            # Yield remaining text
-            if current_sentence.strip():
-                yield current_sentence.strip()
-
-            # Add assistant message to history
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": full_response
-            })
-
-            # Keep history manageable
-            if len(self.conversation_history) > 20:
-                self.conversation_history = self.conversation_history[-20:]
-
-        except Exception as e:
-            logger.error(f"Streaming Claude error: {e}")
-            raise

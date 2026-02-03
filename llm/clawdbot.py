@@ -29,6 +29,7 @@ class ClawdbotClient:
         self._pending_responses: dict[str, asyncio.Future] = {}
         self._chat_responses: dict[str, list[str]] = {}
         self._chat_complete_events: dict[str, asyncio.Event] = {}
+        self._stream_queues: dict[str, asyncio.Queue] = {}  # For streaming responses
         self._listener_task: Optional[asyncio.Task] = None
         logger.info("Clawdbot client initialized")
 
@@ -162,7 +163,11 @@ class ClawdbotClient:
                             content = message.get("content", [])
                             for block in content:
                                 if isinstance(block, dict) and block.get("type") == "text":
-                                    self._chat_responses[run_id].append(block.get("text", ""))
+                                    text_chunk = block.get("text", "")
+                                    self._chat_responses[run_id].append(text_chunk)
+                                    # Also push to stream queue if streaming
+                                    if run_id in self._stream_queues:
+                                        self._stream_queues[run_id].put_nowait(text_chunk)
 
                     elif state == "final":
                         # Final message
@@ -239,9 +244,74 @@ class ClawdbotClient:
             # Generate idempotency key (required by protocol)
             idempotency_key = str(uuid.uuid4())
 
-            # Set up response collection
-            self._chat_responses[idempotency_key] = []
-            self._chat_complete_events[idempotency_key] = asyncio.Event()
+            # Prefix with voice chat context so Hex knows the source
+            prefixed_message = f"[VOICE_CHAT] {user_message}"
+
+            # Send chat.send request
+            params = {
+                "sessionKey": session_key,
+                "message": prefixed_message,
+                "idempotencyKey": idempotency_key
+            }
+
+            # Send request and get the runId from acknowledgment
+            result = await self._send_request("chat.send", params, timeout=10.0)
+            logger.info(f"Chat request acknowledged: {result}")
+            
+            # Use runId from gateway (not our idempotencyKey) for tracking events
+            run_id = result.get("runId", idempotency_key)
+
+            # Set up response collection with the actual runId
+            self._chat_responses[run_id] = []
+            self._chat_complete_events[run_id] = asyncio.Event()
+
+            # Wait for chat completion via events
+            try:
+                await asyncio.wait_for(
+                    self._chat_complete_events[run_id].wait(),
+                    timeout=120.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Chat response timed out")
+
+            # Collect response
+            response_parts = self._chat_responses.get(run_id, [])
+            full_response = "".join(response_parts).strip()
+
+            # Cleanup
+            self._chat_responses.pop(run_id, None)
+            self._chat_complete_events.pop(run_id, None)
+
+            if not full_response:
+                full_response = "I couldn't process that message. Please try again."
+
+            logger.info(f"Hex response received: {len(full_response)} chars")
+            return full_response
+
+        except Exception as e:
+            logger.error(f"Clawdbot gateway error: {e}")
+            raise
+
+    async def stream_response(self, user_message: str, session_key: str = "main"):
+        """
+        Stream a response from Clawdbot, yielding text deltas as they arrive.
+
+        Args:
+            user_message: The user's transcribed message
+            session_key: Session to use (default: "main")
+
+        Yields:
+            Text chunks as they arrive from the LLM
+        """
+        run_id = None
+        try:
+            logger.info(f"Streaming message to Hex via Clawdbot: {user_message[:100]}...")
+
+            if not self._handshake_complete:
+                await self.connect()
+
+            # Generate idempotency key (required by protocol)
+            idempotency_key = str(uuid.uuid4())
 
             # Prefix with voice chat context so Hex knows the source
             prefixed_message = f"[VOICE_CHAT] {user_message}"
@@ -253,35 +323,52 @@ class ClawdbotClient:
                 "idempotencyKey": idempotency_key
             }
 
-            # Send request (don't wait for full response here, just ack)
+            # Send request and get the runId from acknowledgment
             result = await self._send_request("chat.send", params, timeout=10.0)
-            logger.info(f"Chat request acknowledged: {result}")
+            logger.info(f"Streaming chat request acknowledged: {result}")
+            
+            # Use runId from gateway (not our idempotencyKey) for tracking events
+            run_id = result.get("runId", idempotency_key)
 
-            # Wait for chat completion via events
-            try:
-                await asyncio.wait_for(
-                    self._chat_complete_events[idempotency_key].wait(),
-                    timeout=120.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Chat response timed out")
+            # Set up streaming queue with the actual runId
+            stream_queue = asyncio.Queue()
+            self._stream_queues[run_id] = stream_queue
+            self._chat_complete_events[run_id] = asyncio.Event()
 
-            # Collect response
-            response_parts = self._chat_responses.get(idempotency_key, [])
-            full_response = "".join(response_parts).strip()
+            # Yield text chunks as they arrive
+            while True:
+                # Check if complete
+                if self._chat_complete_events[run_id].is_set():
+                    # Drain remaining items from queue
+                    while not stream_queue.empty():
+                        try:
+                            chunk = stream_queue.get_nowait()
+                            if chunk is not None:
+                                yield chunk
+                        except asyncio.QueueEmpty:
+                            break
+                    break
+
+                # Wait for next chunk with timeout
+                try:
+                    chunk = await asyncio.wait_for(stream_queue.get(), timeout=0.1)
+                    if chunk is not None:
+                        yield chunk
+                except asyncio.TimeoutError:
+                    continue
 
             # Cleanup
-            self._chat_responses.pop(idempotency_key, None)
-            self._chat_complete_events.pop(idempotency_key, None)
+            self._stream_queues.pop(run_id, None)
+            self._chat_complete_events.pop(run_id, None)
 
-            if not full_response:
-                full_response = "I couldn't process that message. Please try again."
-
-            logger.info(f"Hex response received: {len(full_response)} chars")
-            return full_response
+            logger.info(f"Streaming complete for {run_id}")
 
         except Exception as e:
-            logger.error(f"Clawdbot gateway error: {e}")
+            logger.error(f"Clawdbot streaming error: {e}")
+            # Cleanup on error
+            if run_id:
+                self._stream_queues.pop(run_id, None)
+                self._chat_complete_events.pop(run_id, None)
             raise
 
     async def disconnect(self):
