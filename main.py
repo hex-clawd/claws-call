@@ -35,8 +35,13 @@ def setup_logging():
 
 
 async def run_voice_chat_mode():
-    """Run in voice chat mode (Phase 2)."""
-    from pyrogram import Client
+    """Run in voice chat mode (Phase 2).
+    
+    Bot monitors the group and auto-joins when a voice chat starts.
+    Leaves when the voice chat ends.
+    """
+    from pyrogram import Client, filters
+    from pyrogram.raw.functions.channels import GetFullChannel
     from bot.voice_chat import VoiceChat
     from pipeline.voice_pipeline import VoicePipeline
 
@@ -50,29 +55,82 @@ async def run_voice_chat_mode():
         phone_number=config.PHONE_NUMBER
     )
 
+    # State containers (will be initialized after app starts)
+    voice_chat = None
+    pipeline = None
+
+    async def join_call():
+        """Join the voice chat and start processing."""
+        nonlocal voice_chat, pipeline
+        
+        if voice_chat and voice_chat.is_connected:
+            logger.info("Already connected to voice chat, skipping join")
+            return
+            
+        logger.info("Joining voice chat...")
+        
+        # Create voice chat handler
+        voice_chat = VoiceChat(app, None)
+        
+        # Create pipeline with voice chat handler
+        pipeline = VoicePipeline(voice_chat)
+        voice_chat.pipeline = pipeline
+        
+        # Start pipeline and join
+        await pipeline.start()
+        await voice_chat.join_voice_chat()
+        
+        logger.info("Voice chat joined! Bot is now active in the call.")
+
+    async def leave_call():
+        """Leave the voice chat and clean up."""
+        nonlocal voice_chat, pipeline
+        
+        if not voice_chat or not voice_chat.is_connected:
+            logger.info("Not in voice chat, nothing to leave")
+            return
+            
+        logger.info("Leaving voice chat...")
+        
+        if voice_chat:
+            await voice_chat.stop()
+            voice_chat = None
+        if pipeline:
+            await pipeline.stop()
+            pipeline = None
+            
+        logger.info("Left voice chat. Back to monitoring mode.")
+
     try:
         await app.start()
         logger.info("Pyrogram client started")
 
-        # Create pipeline first (will be referenced by voice chat)
-        # We'll create a placeholder and set it later
-        voice_chat = None
-        pipeline = None
+        # Register handler for voice chat started
+        @app.on_message(filters.chat(config.VOICE_CHAT_GROUP_ID) & filters.video_chat_started)
+        async def on_voice_chat_started(client, message):
+            """Called when a voice chat starts in the monitored group."""
+            logger.info(f"Voice chat started in group {message.chat.id}!")
+            await join_call()
 
-        # Create voice chat handler
-        voice_chat = VoiceChat(app, None)  # Pipeline will be set later
+        # Register handler for voice chat ended
+        @app.on_message(filters.chat(config.VOICE_CHAT_GROUP_ID) & filters.video_chat_ended)
+        async def on_voice_chat_ended(client, message):
+            """Called when a voice chat ends in the monitored group."""
+            logger.info(f"Voice chat ended in group {message.chat.id}!")
+            await leave_call()
 
-        # Create pipeline with voice chat handler
-        pipeline = VoicePipeline(voice_chat)
-        voice_chat.pipeline = pipeline  # Set the pipeline reference
-
-        # Start pipeline
-        await pipeline.start()
-
-        # Join voice chat
-        await voice_chat.join_voice_chat()
-
-        logger.info("Voice chat mode active. Speak to the bot in the voice chat!")
+        logger.info(f"Monitoring group {config.VOICE_CHAT_GROUP_ID} for voice chats...")
+        logger.info("Bot will auto-join when a voice chat starts!")
+        
+        # Check if there's already an active call
+        try:
+            peer = await app.resolve_peer(config.VOICE_CHAT_GROUP_ID)
+            full_chat = await app.invoke(GetFullChannel(channel=peer))
+            if hasattr(full_chat.full_chat, 'call') and full_chat.full_chat.call:
+                logger.info("Active voice chat detected! Joining...")
+                await join_call()
+        except Exception as e:
+            logger.debug(f"Could not check for active call (normal for groups): {e}")
 
         # Keep running
         while True:
@@ -80,17 +138,11 @@ async def run_voice_chat_mode():
 
     except KeyboardInterrupt:
         logger.info("Stopping voice chat mode...")
-        if voice_chat:
-            await voice_chat.stop()
-        if pipeline:
-            await pipeline.stop()
+        await leave_call()
         await app.stop()
     except Exception as e:
         logger.error(f"Error in voice chat mode: {e}", exc_info=True)
-        if voice_chat:
-            await voice_chat.stop()
-        if pipeline:
-            await pipeline.stop()
+        await leave_call()
         await app.stop()
         raise
 

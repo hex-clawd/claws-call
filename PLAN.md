@@ -1,27 +1,42 @@
 # Implementation Plan — Telegram Voice Call AI Assistant
 
+## Current Status (v1.1.0)
+✅ Phase 1: Voice Message MVP — COMPLETE
+✅ Phase 2: Group Voice Chat Real-Time — COMPLETE (basic)
+🔧 Phase 3: Polish — IN PROGRESS
+
+## What Works
+- Full pipeline: Audio → VAD → STT → LLM → TTS → Playback
+- Interruption handling (user can talk over bot)
+- Clawdbot gateway integration
+- [VOICE_CHAT] prefix for context awareness
+- Markdown stripping before TTS
+
 ## Phases
 
-### Phase 1: Voice Message MVP (2-3 days)
+### Phase 1: Voice Message MVP ✅
 - User sends voice msg → bot transcribes → Claude → TTS → voice msg reply
 - Validate STT/LLM/TTS pipeline, format conversions, API integrations
 - No real-time complexity yet
 - Use Bot API (simple)
 
-### Phase 2: Group Voice Chat Real-Time (3-5 days)
+### Phase 2: Group Voice Chat Real-Time ✅
 - Userbot joins private group voice chat
-- `GroupCallRaw` callbacks for PCM I/O
+- pytgcalls 2.x with RecordStream + ExternalMedia
 - Silero VAD → turn detection (700ms silence threshold)
-- Streaming STT (whisper.cpp or faster-whisper)
-- Claude API streaming
-- Edge TTS streaming
+- faster-whisper for STT
+- Clawdbot gateway for LLM (routes to Hex)
+- Edge TTS with ffmpeg decoding
 - Async pipeline with interruption handling
 
-### Phase 3: Polish (1-2 days)
-- Latency optimization (<2.5s target)
-- Error recovery, reconnection logic
-- Logging, monitoring
-- Private 1-on-1 calls if `tgcalls` releases stable support
+### Phase 3: Polish 🔧
+- [x] Interruption handling
+- [x] Markdown stripping
+- [ ] **Streaming LLM → TTS** (end goal for low latency)
+- [ ] Auto-join when user starts call (not bot-initiated)
+- [ ] Buffer flush delay at end (last words cut off)
+- [ ] Latency optimization (<2.5s target)
+- [ ] Error recovery, reconnection logic
 
 ---
 
