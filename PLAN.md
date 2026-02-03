@@ -11,6 +11,9 @@
 - Clawdbot gateway integration
 - [VOICE_CHAT] prefix for context awareness
 - Markdown stripping before TTS
+- Auto-join when user starts voice call
+- Buffer drain (no cut-off endings)
+- 1500ms silence threshold (natural pauses)
 
 ## Phases
 
@@ -23,7 +26,7 @@
 ### Phase 2: Group Voice Chat Real-Time ✅
 - Userbot joins private group voice chat
 - pytgcalls 2.x with RecordStream + ExternalMedia
-- Silero VAD → turn detection (700ms silence threshold)
+- Silero VAD → turn detection (1500ms silence threshold)
 - faster-whisper for STT
 - Clawdbot gateway for LLM (routes to Hex)
 - Edge TTS with ffmpeg decoding
@@ -35,6 +38,7 @@
 - [ ] **Streaming LLM → TTS** (end goal for low latency)
 - [x] Auto-join when user starts call (not bot-initiated)
 - [x] Buffer drain before done (no more cut-off endings)
+- [x] Increased VAD silence threshold (1500ms for natural pauses)
 - [ ] Latency optimization (<2.5s target)
 - [ ] Error recovery, reconnection logic
 
