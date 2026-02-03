@@ -82,15 +82,25 @@ async def run_voice_chat_mode():
         
         logger.info("Voice chat joined! Bot is now active in the call.")
 
-    async def leave_call():
-        """Leave the voice chat and clean up."""
+    async def leave_call(voice_chat_ended: bool = True):
+        """Leave the voice chat and clean up.
+        
+        Args:
+            voice_chat_ended: If True, the voice chat itself has ended (from Telegram event).
+                            If False, we're just disconnecting but chat may continue.
+        """
         nonlocal voice_chat, pipeline
         
-        if not voice_chat or not voice_chat.is_connected:
-            logger.info("Not in voice chat, nothing to leave")
+        if not voice_chat:
+            logger.info("No voice_chat instance, nothing to leave")
             return
             
-        logger.info("Leaving voice chat...")
+        # Check if we're connected OR if voice chat ended (need to clean up either way)
+        if not voice_chat.is_connected and not voice_chat._voice_chat_active and not voice_chat_ended:
+            logger.info("Not in voice chat and not active, nothing to leave")
+            return
+            
+        logger.info(f"Leaving voice chat (voice_chat_ended={voice_chat_ended})...")
         
         if voice_chat:
             await voice_chat.stop()
@@ -116,8 +126,8 @@ async def run_voice_chat_mode():
         @app.on_message(filters.chat(config.VOICE_CHAT_GROUP_ID) & filters.video_chat_ended)
         async def on_voice_chat_ended(client, message):
             """Called when a voice chat ends in the monitored group."""
-            logger.info(f"Voice chat ended in group {message.chat.id}!")
-            await leave_call()
+            logger.info(f"Voice chat ENDED in group {message.chat.id}! (This is a true end, not a disconnect)")
+            await leave_call(voice_chat_ended=True)
 
         logger.info(f"Monitoring group {config.VOICE_CHAT_GROUP_ID} for voice chats...")
         logger.info("Bot will auto-join when a voice chat starts!")
@@ -138,11 +148,11 @@ async def run_voice_chat_mode():
 
     except KeyboardInterrupt:
         logger.info("Stopping voice chat mode...")
-        await leave_call()
+        await leave_call(voice_chat_ended=True)
         await app.stop()
     except Exception as e:
         logger.error(f"Error in voice chat mode: {e}", exc_info=True)
-        await leave_call()
+        await leave_call(voice_chat_ended=True)
         await app.stop()
         raise
 
