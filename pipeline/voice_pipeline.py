@@ -173,12 +173,27 @@ class VoicePipeline:
                     # Process through VAD
                     is_speech, turn_ended = self.vad.update_state(vad_chunk)
 
+                    # Log speech detection for debugging (rate limited)
+                    if is_speech and not hasattr(self, '_last_speech_log_count'):
+                        self._last_speech_log_count = 0
+                    if is_speech:
+                        self._last_speech_log_count = getattr(self, '_last_speech_log_count', 0) + 1
+                        if self._last_speech_log_count <= 3 or self._last_speech_log_count % 50 == 0:
+                            buffer_size = len(self.voice_chat.output_buffer)
+                            logger.info(f"🎤 SPEECH DETECTED (count={self._last_speech_log_count}, is_speaking={self.is_speaking}, buffer={buffer_size})")
+
                     if is_speech:
                         # Check for interruption - user speaking while bot is talking
-                        if self.is_speaking:
+                        # CRITICAL: Check BOTH is_speaking (TTS generating) AND output_buffer (playback in progress)
+                        # is_speaking becomes False when TTS generation finishes, but playback continues!
+                        buffer_has_audio = len(self.voice_chat.output_buffer) > 0
+                        bot_is_outputting = self.is_speaking or buffer_has_audio
+                        
+                        if bot_is_outputting:
                             logger.info("!" * 50)
-                            logger.info("INTERRUPTION DETECTED!")
-                            logger.info(f"  is_speaking={self.is_speaking}")
+                            logger.info("🛑 INTERRUPTION DETECTED! User spoke during bot output!")
+                            logger.info(f"  is_speaking={self.is_speaking} (TTS generating)")
+                            logger.info(f"  buffer_has_audio={buffer_has_audio} (playback active)")
                             logger.info(f"  output_buffer={len(self.voice_chat.output_buffer)} chunks")
                             logger.info("!" * 50)
                             await self._handle_interruption()
@@ -204,43 +219,54 @@ class VoicePipeline:
 
     async def _handle_interruption(self):
         """Handle user interruption of AI speech."""
-        logger.info("=" * 50)
-        logger.info("INTERRUPTION: Starting interruption handling")
-        logger.info(f"  is_speaking={self.is_speaking}, is_processing={self.is_processing}")
-        logger.info(f"  llm_task={self.llm_task}, done={self.llm_task.done() if self.llm_task else 'N/A'}")
-        logger.info(f"  output_buffer_size={len(self.voice_chat.output_buffer)}")
+        logger.info("=" * 60)
+        logger.info("🛑 INTERRUPTION HANDLER TRIGGERED 🛑")
+        logger.info(f"  State: is_speaking={self.is_speaking}, is_processing={self.is_processing}")
+        logger.info(f"  LLM task: {self.llm_task}, done={self.llm_task.done() if self.llm_task else 'N/A'}")
+        logger.info(f"  Output buffer: {len(self.voice_chat.output_buffer)} chunks queued")
 
-        # Set interruption flag FIRST - TTS checks this during streaming
+        # 1. Set interruption flag FIRST - TTS checks this during streaming
         self.interrupted.set()
-        logger.info("INTERRUPTION: Flag set")
+        logger.info("  ✓ Interruption flag SET")
 
-        # Clear TTS output buffer immediately - stops playback
+        # 2. Clear TTS output buffer IMMEDIATELY - this stops playback
+        buffer_before = len(self.voice_chat.output_buffer)
         self.voice_chat.clear_output_buffer()
-        logger.info("INTERRUPTION: Output buffer cleared")
+        logger.info(f"  ✓ Output buffer CLEARED ({buffer_before} chunks removed)")
         
+        # 3. Mark as not speaking
         self.is_speaking = False
+        logger.info("  ✓ is_speaking = False")
 
-        # Cancel ongoing LLM generation (which includes TTS since it's awaited inside)
+        # 4. Cancel ongoing LLM/TTS generation task
         if self.llm_task and not self.llm_task.done():
-            logger.info("INTERRUPTION: Cancelling LLM task...")
+            logger.info("  → Cancelling LLM task...")
             self.llm_task.cancel()
             try:
                 await self.llm_task
             except asyncio.CancelledError:
-                logger.info("INTERRUPTION: LLM task cancelled successfully")
+                logger.info("  ✓ LLM task CANCELLED")
+        else:
+            logger.info("  ✓ No active LLM task to cancel")
 
+        # 5. Reset processing state
         self.is_processing = False
+        logger.info("  ✓ is_processing = False")
 
-        # Reset VAD state to avoid detecting the same speech again
+        # 6. Reset VAD state to start fresh
         self.vad.reset()
+        logger.info("  ✓ VAD state RESET")
 
-        # Clear STT buffer and VAD accumulator
-        # NOTE: New speech will be accumulated fresh after this
+        # 7. Clear speech buffers - new speech will be accumulated fresh
         self.stt_buffer.clear()
         self.vad_accumulator.clear()
+        logger.info("  ✓ STT buffer and VAD accumulator CLEARED")
 
-        logger.info("INTERRUPTION: Complete - ready for new input")
-        logger.info("=" * 50)
+        # Reset speech detection counter
+        self._last_speech_log_count = 0
+
+        logger.info("🛑 INTERRUPTION COMPLETE - Ready for new input 🛑")
+        logger.info("=" * 60)
 
     async def _process_user_turn(self):
         """Process a complete user turn (speech -> STT -> LLM -> TTS)."""
@@ -350,11 +376,17 @@ class VoicePipeline:
                 logger.debug(f"Markdown stripped: {len(response_text)} -> {len(clean_text)} chars")
 
             # Generate and play TTS
-            logger.info("Starting TTS playback (is_speaking=True)")
+            # NOTE: is_speaking=True during TTS GENERATION, but playback continues after!
+            # Interruption detection also checks output_buffer for active playback
+            logger.info("🔊 TTS GENERATION STARTING (is_speaking=True)")
             self.is_speaking = True
             await self._speak_text(clean_text)
+            # Keep is_speaking True while buffer is draining
+            logger.info(f"🔊 TTS GENERATION DONE, buffer has {len(self.voice_chat.output_buffer)} chunks remaining")
+            # Wait briefly for buffer to drain, but set is_speaking=False
+            # Interruption check will still work because it also checks buffer
             self.is_speaking = False
-            logger.info("TTS playback finished (is_speaking=False)")
+            logger.info("🔊 TTS generation finished (is_speaking=False, buffer may still be playing)")
 
         except asyncio.CancelledError:
             logger.info("CANCELLED: LLM/TTS task was cancelled")
