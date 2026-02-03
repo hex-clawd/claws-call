@@ -190,13 +190,19 @@ class VoicePipeline:
                         bot_is_outputting = self.is_speaking or buffer_has_audio
                         
                         if bot_is_outputting:
-                            logger.info("!" * 50)
-                            logger.info("🛑 INTERRUPTION DETECTED! User spoke during bot output!")
-                            logger.info(f"  is_speaking={self.is_speaking} (TTS generating)")
-                            logger.info(f"  buffer_has_audio={buffer_has_audio} (playback active)")
-                            logger.info(f"  output_buffer={len(self.voice_chat.output_buffer)} chunks")
-                            logger.info("!" * 50)
-                            await self._handle_interruption()
+                            # ========== INSTANT INTERRUPTION ==========
+                            # Clear buffer SYNCHRONOUSLY - no await, no delay!
+                            # This is the critical UX fix - humans can't talk over someone.
+                            buffer_before = len(self.voice_chat.output_buffer)
+                            self.voice_chat.output_buffer.clear()  # Direct access, instant
+                            self.voice_chat.is_playing = False
+                            self.interrupted.set()
+                            self.is_speaking = False
+                            logger.info(f"🛑 INSTANT INTERRUPT: Cleared {buffer_before} chunks immediately")
+                            # ==========================================
+                            
+                            # Now handle the rest of cleanup asynchronously (won't block)
+                            asyncio.create_task(self._handle_interruption_cleanup())
 
                         # Accumulate audio for STT (including the interrupting speech)
                         self.stt_buffer.append(vad_chunk)
@@ -217,28 +223,23 @@ class VoicePipeline:
         except Exception as e:
             logger.error(f"Error in processing loop: {e}", exc_info=True)
 
-    async def _handle_interruption(self):
-        """Handle user interruption of AI speech."""
+    async def _handle_interruption_cleanup(self):
+        """
+        Handle non-time-critical cleanup after instant interruption.
+        
+        The time-critical parts (buffer clear, interrupt flag, is_speaking)
+        are handled SYNCHRONOUSLY in _processing_loop for instant response.
+        This method handles the slower cleanup tasks asynchronously.
+        """
         logger.info("=" * 60)
-        logger.info("🛑 INTERRUPTION HANDLER TRIGGERED 🛑")
+        logger.info("🛑 INTERRUPTION CLEANUP (async) 🛑")
         logger.info(f"  State: is_speaking={self.is_speaking}, is_processing={self.is_processing}")
         logger.info(f"  LLM task: {self.llm_task}, done={self.llm_task.done() if self.llm_task else 'N/A'}")
-        logger.info(f"  Output buffer: {len(self.voice_chat.output_buffer)} chunks queued")
 
-        # 1. Set interruption flag FIRST - TTS checks this during streaming
-        self.interrupted.set()
-        logger.info("  ✓ Interruption flag SET")
+        # NOTE: Buffer already cleared, interrupted flag already set, is_speaking already False
+        # (done synchronously in _processing_loop for instant response)
 
-        # 2. Clear TTS output buffer IMMEDIATELY - this stops playback
-        buffer_before = len(self.voice_chat.output_buffer)
-        self.voice_chat.clear_output_buffer()
-        logger.info(f"  ✓ Output buffer CLEARED ({buffer_before} chunks removed)")
-        
-        # 3. Mark as not speaking
-        self.is_speaking = False
-        logger.info("  ✓ is_speaking = False")
-
-        # 4. Cancel ongoing LLM/TTS generation task
+        # 1. Cancel ongoing LLM/TTS generation task
         if self.llm_task and not self.llm_task.done():
             logger.info("  → Cancelling LLM task...")
             self.llm_task.cancel()
@@ -249,15 +250,15 @@ class VoicePipeline:
         else:
             logger.info("  ✓ No active LLM task to cancel")
 
-        # 5. Reset processing state
+        # 2. Reset processing state
         self.is_processing = False
         logger.info("  ✓ is_processing = False")
 
-        # 6. Reset VAD state to start fresh
+        # 3. Reset VAD state to start fresh
         self.vad.reset()
         logger.info("  ✓ VAD state RESET")
 
-        # 7. Clear speech buffers - new speech will be accumulated fresh
+        # 4. Clear speech buffers - new speech will be accumulated fresh
         self.stt_buffer.clear()
         self.vad_accumulator.clear()
         logger.info("  ✓ STT buffer and VAD accumulator CLEARED")
@@ -265,7 +266,7 @@ class VoicePipeline:
         # Reset speech detection counter
         self._last_speech_log_count = 0
 
-        logger.info("🛑 INTERRUPTION COMPLETE - Ready for new input 🛑")
+        logger.info("🛑 INTERRUPTION CLEANUP COMPLETE - Ready for new input 🛑")
         logger.info("=" * 60)
 
     async def _process_user_turn(self):
@@ -387,6 +388,7 @@ class VoicePipeline:
             
             # Stream tokens and accumulate sentences
             # NOTE: Clawdbot sends CUMULATIVE deltas (full response so far), not incremental
+            chunk_count = 0
             async for chunk in self.claude.stream_response(user_text):
                 if self.interrupted.is_set():
                     logger.info("INTERRUPTED: During LLM streaming - aborting")
@@ -395,6 +397,11 @@ class VoicePipeline:
                 # Extract only the NEW portion of the cumulative response
                 new_text = chunk[last_chunk_len:]
                 last_chunk_len = len(chunk)
+                
+                # CRITICAL: Yield control to let VAD processing loop run
+                chunk_count += 1
+                if chunk_count % 5 == 0:  # Yield every 5 chunks
+                    await asyncio.sleep(0)
                 
                 if not new_text:
                     continue  # No new content in this delta
@@ -545,6 +552,11 @@ class VoicePipeline:
                 # Send to voice chat output buffer
                 await self.voice_chat.play_audio(audio_chunk)
                 chunks_played += 1
+                
+                # CRITICAL: Yield control to let VAD processing loop run
+                # Without this, TTS hoards the event loop and interruption is never detected
+                if chunks_played % 10 == 0:  # Yield every 10 chunks (~100ms)
+                    await asyncio.sleep(0)
 
             logger.info(f"TTS queued: {chunks_played} chunks for '{text[:30]}...'")
 
