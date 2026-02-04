@@ -1,15 +1,23 @@
-# Telegram Voice Chat AI Assistant
+# Telegram Claw Call
 
-Real-time voice conversation in Telegram group voice chats. The bot monitors a configured group and automatically joins when a voice chat starts, enabling live bidirectional AI conversation.
+Talk to your OpenClaw agent through Telegram voice chat. Not a chatbot — your personal AI assistant with full tool access, memory, and context.
+
+The bot monitors a private Telegram group and automatically joins when you start a voice chat. Speak naturally, interrupt anytime, have a real conversation.
+
+## Why This Matters
+
+Generic voice assistants are clawless. They answer questions in isolation with no memory, no tools, no context about you.
+
+Your OpenClaw agent is different — it knows your projects, accesses your files, runs commands, remembers your preferences. This gives it a voice.
 
 ## Features
 
-- **Live voice conversation** in Telegram group voice chats
-- **Voice Activity Detection** (Silero VAD) for natural turn-taking
-- **Instant interruption** - speak to interrupt the AI mid-response
-- **Streaming TTS** for low-latency responses
-- **Auto-rejoin** on disconnect with exponential backoff
-- **OpenClaw integration** - conversations go through your OpenClaw agent
+- **Real voice conversation** — not transcribe-and-reply, actual bidirectional audio
+- **Natural turn-taking** — Silero VAD detects when you're done speaking
+- **Instant interruption** — speak over the response to cut it off
+- **Streaming TTS** — low-latency sentence-by-sentence playback
+- **Auto-rejoin** — reconnects on disconnect with exponential backoff
+- **Full OpenClaw integration** — your agent with all its capabilities
 
 ## Architecture
 
