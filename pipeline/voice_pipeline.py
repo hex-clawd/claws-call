@@ -10,7 +10,7 @@ from audio.vad import VAD
 from audio.stt import STT
 from audio.tts import TTS
 from audio.utils import convert_whisper_to_telegram
-from llm.clawdbot import ClawdbotClient
+from llm.openclaw import OpenClawClient
 import config
 
 logger = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ class VoicePipeline:
         self.vad = VAD()
         self.stt = STT()
         self.tts = TTS()
-        self.claude = ClawdbotClient()
+        self.claude = OpenClawClient()
         self.voice_chat = voice_chat_handler
 
         # Audio buffers
@@ -387,7 +387,7 @@ class VoicePipeline:
             last_chunk_len = 0  # Track cumulative length to extract only new text
             
             # Stream tokens and accumulate sentences
-            # NOTE: Clawdbot sends CUMULATIVE deltas (full response so far), not incremental
+            # NOTE: OpenClaw sends CUMULATIVE deltas (full response so far), not incremental
             chunk_count = 0
             async for chunk in self.claude.stream_response(user_text):
                 if self.interrupted.is_set():

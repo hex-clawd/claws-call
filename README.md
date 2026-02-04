@@ -9,7 +9,7 @@ Real-time voice conversation in Telegram group voice chats. The bot monitors a c
 - **Instant interruption** - speak to interrupt the AI mid-response
 - **Streaming TTS** for low-latency responses
 - **Auto-rejoin** on disconnect with exponential backoff
-- **Clawdbot integration** - conversations go through your Clawdbot agent
+- **OpenClaw integration** - conversations go through your OpenClaw agent
 
 ## Architecture
 
@@ -22,7 +22,7 @@ Silero VAD (turn detection)
     ↓ On turn end
 faster-whisper STT (local)
     ↓ Transcription
-Clawdbot Gateway → Your AI Agent
+OpenClaw Gateway → Your AI Agent
     ↓ Response text (streaming)
 Edge TTS (sentence-level streaming)
     ↓ PCM 24kHz mono
@@ -58,7 +58,7 @@ Get a separate SIM card or eSIM just for the bot. This way:
 - Python 3.11+
 - macOS (Apple Silicon) or Linux
 - Telegram account (phone number required)
-- [Clawdbot](https://github.com/clawdbot/clawdbot) running locally
+- [OpenClaw](https://github.com/openclaw/openclaw) running locally
 - A private Telegram group for voice chat
 
 ## Setup
@@ -97,12 +97,12 @@ for dialog in app.get_dialogs():
         print(f"{dialog.chat.title}: {dialog.chat.id}")
 ```
 
-### 5. Get Clawdbot Gateway Token
+### 5. Get OpenClaw Gateway Token
 
-Your Clawdbot gateway token is in `~/.clawdbot/clawdbot.json` under `gateway.auth.token`:
+Your OpenClaw gateway token is in `~/.openclaw/openclaw.json` under `gateway.auth.token`:
 
 ```bash
-cat ~/.clawdbot/clawdbot.json | grep -A2 '"auth"' | grep token
+cat ~/.openclaw/openclaw.json | grep -A2 '"auth"' | grep token
 ```
 
 ### 6. Configure Environment
@@ -125,9 +125,9 @@ AUTHORIZED_USER_ID=123456789
 # Voice Chat Group (negative number)
 VOICE_CHAT_GROUP_ID=-1001234567890
 
-# Clawdbot Gateway
-CLAWDBOT_GATEWAY_URL=ws://127.0.0.1:18789
-CLAWDBOT_GATEWAY_TOKEN=your_token_here
+# OpenClaw Gateway
+OPENCLAW_GATEWAY_URL=ws://127.0.0.1:18789
+OPENCLAW_GATEWAY_TOKEN=your_token_here
 
 # Whisper model (tiny.en, base.en, small.en, medium.en)
 WHISPER_MODEL=small.en
@@ -147,7 +147,7 @@ Enter the code sent to your Telegram account. A session file is created for futu
 
 ### Normal Operation
 
-1. Ensure Clawdbot is running (`clawdbot gateway status`)
+1. Ensure OpenClaw is running (`openclaw gateway status`)
 2. Start the bot: `python main.py`
 3. The bot monitors the configured group
 4. Start a voice chat in the group - the bot joins automatically
@@ -177,7 +177,7 @@ telegram-voice-call/
 │   ├── vad.py              # Voice Activity Detection (Silero)
 │   └── utils.py            # Audio conversion utilities
 ├── llm/
-│   └── clawdbot.py         # Clawdbot Gateway client
+│   └── openclaw.py         # OpenClaw Gateway client
 └── pipeline/
     └── voice_pipeline.py   # Main async processing pipeline
 ```
@@ -185,7 +185,7 @@ telegram-voice-call/
 ## Security
 
 - Only the configured `AUTHORIZED_USER_ID` can interact with the bot
-- Gateway runs on localhost only - Clawdbot must be on the same machine
+- Gateway runs on localhost only - OpenClaw must be on the same machine
 
 ## Troubleshooting
 
@@ -198,7 +198,7 @@ Get your group chat ID using [@RawDataBot](https://t.me/RawDataBot) or the scrip
 - Check `bot.log` for errors
 
 ### "Gateway connection failed"
-- Ensure Clawdbot is running: `clawdbot gateway status`
+- Ensure OpenClaw is running: `openclaw gateway status`
 - Verify your gateway token in `.env`
 
 ### Audio issues

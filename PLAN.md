@@ -8,7 +8,7 @@
 ## What Works
 - Full pipeline: Audio → VAD → STT → LLM → TTS → Playback
 - Interruption handling (user can talk over bot)
-- Clawdbot gateway integration
+- OpenClaw gateway integration
 - [VOICE_CHAT] prefix for context awareness
 - Markdown stripping before TTS
 - Auto-join when user starts voice call
@@ -28,7 +28,7 @@
 - pytgcalls 2.x with RecordStream + ExternalMedia
 - Silero VAD → turn detection (1500ms silence threshold)
 - faster-whisper for STT
-- Clawdbot gateway for LLM (routes to Hex)
+- OpenClaw gateway for LLM (routes to Hex)
 - Edge TTS with ffmpeg decoding
 - Async pipeline with interruption handling
 

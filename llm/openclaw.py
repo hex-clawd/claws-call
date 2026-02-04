@@ -1,4 +1,4 @@
-"""Clawdbot Gateway integration - sends messages through Hex instead of raw Claude."""
+"""OpenClaw Gateway integration - sends messages through Hex instead of raw Claude."""
 
 import logging
 import asyncio
@@ -9,23 +9,23 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Gateway config - local Clawdbot instance
+# Gateway config - local OpenClaw instance
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import os
-GATEWAY_URL = os.getenv("CLAWDBOT_GATEWAY_URL", "ws://127.0.0.1:18789")
-GATEWAY_TOKEN = os.getenv("CLAWDBOT_GATEWAY_TOKEN", "")
+GATEWAY_URL = os.getenv("OPENCLAW_GATEWAY_URL", "ws://127.0.0.1:18789")
+GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
 
 # Protocol version
 PROTOCOL_VERSION = 3
 
 
-class ClawdbotClient:
-    """Client that sends messages through Clawdbot Gateway (talks to Hex!)."""
+class OpenClawClient:
+    """Client that sends messages through OpenClaw Gateway (talks to Hex!)."""
 
     def __init__(self):
-        """Initialize the Clawdbot client."""
+        """Initialize the OpenClaw client."""
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.request_id = 0
         self._connected = False
@@ -35,7 +35,7 @@ class ClawdbotClient:
         self._chat_complete_events: dict[str, asyncio.Event] = {}
         self._stream_queues: dict[str, asyncio.Queue] = {}  # For streaming responses
         self._listener_task: Optional[asyncio.Task] = None
-        logger.info("Clawdbot client initialized")
+        logger.info("OpenClaw client initialized")
 
     def _next_id(self) -> str:
         """Generate next request ID."""
@@ -43,12 +43,12 @@ class ClawdbotClient:
         return str(self.request_id)
 
     async def connect(self):
-        """Connect to the Clawdbot gateway and complete handshake."""
+        """Connect to the OpenClaw gateway and complete handshake."""
         if self._handshake_complete:
             return
 
         try:
-            logger.info(f"Connecting to Clawdbot gateway at {GATEWAY_URL}")
+            logger.info(f"Connecting to OpenClaw gateway at {GATEWAY_URL}")
             self.ws = await websockets.connect(GATEWAY_URL)
             self._connected = True
 
@@ -113,7 +113,7 @@ class ClawdbotClient:
             self._listener_task = asyncio.create_task(self._listen())
 
         except Exception as e:
-            logger.error(f"Failed to connect to Clawdbot gateway: {e}")
+            logger.error(f"Failed to connect to OpenClaw gateway: {e}")
             self._connected = False
             self._handshake_complete = False
             raise
@@ -230,7 +230,7 @@ class ClawdbotClient:
 
     async def get_response(self, user_message: str, session_key: str = "main") -> str:
         """
-        Send a message through Clawdbot and get Hex's response.
+        Send a message through OpenClaw and get Hex's response.
 
         Args:
             user_message: The user's transcribed message
@@ -240,7 +240,7 @@ class ClawdbotClient:
             Hex's response text
         """
         try:
-            logger.info(f"Sending message to Hex via Clawdbot: {user_message[:100]}...")
+            logger.info(f"Sending message to Hex via OpenClaw: {user_message[:100]}...")
 
             if not self._handshake_complete:
                 await self.connect()
@@ -293,12 +293,12 @@ class ClawdbotClient:
             return full_response
 
         except Exception as e:
-            logger.error(f"Clawdbot gateway error: {e}")
+            logger.error(f"OpenClaw gateway error: {e}")
             raise
 
     async def stream_response(self, user_message: str, session_key: str = "main"):
         """
-        Stream a response from Clawdbot, yielding text deltas as they arrive.
+        Stream a response from OpenClaw, yielding text deltas as they arrive.
 
         Args:
             user_message: The user's transcribed message
@@ -309,7 +309,7 @@ class ClawdbotClient:
         """
         run_id = None
         try:
-            logger.info(f"Streaming message to Hex via Clawdbot: {user_message[:100]}...")
+            logger.info(f"Streaming message to Hex via OpenClaw: {user_message[:100]}...")
 
             if not self._handshake_complete:
                 await self.connect()
@@ -368,7 +368,7 @@ class ClawdbotClient:
             logger.info(f"Streaming complete for {run_id}")
 
         except Exception as e:
-            logger.error(f"Clawdbot streaming error: {e}")
+            logger.error(f"OpenClaw streaming error: {e}")
             # Cleanup on error
             if run_id:
                 self._stream_queues.pop(run_id, None)
@@ -389,4 +389,4 @@ class ClawdbotClient:
             await self.ws.close()
             self._connected = False
             self._handshake_complete = False
-            logger.info("Disconnected from Clawdbot gateway")
+            logger.info("Disconnected from OpenClaw gateway")
