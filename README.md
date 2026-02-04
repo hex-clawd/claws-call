@@ -120,6 +120,34 @@ VAD_MIN_SPEECH_DURATION_MS=300               # Minimum speech duration
 LOG_LEVEL=INFO
 ```
 
+### 6. Clawdbot Gateway Setup (Optional)
+
+If you're running [Clawdbot](https://github.com/clawdbot/clawdbot), you can route voice conversations through your Clawdbot agent instead of calling Claude API directly. This gives you:
+
+- Conversations go through your agent with full context
+- Your agent's personality and memory
+- Integration with other Clawdbot features
+
+**Setup:**
+
+1. **Get your Gateway Token** from Clawdbot's config:
+   ```bash
+   cat ~/.clawdbot/clawdbot.json | grep -A2 '"auth"' | grep token
+   ```
+   Or check your Clawdbot config file at `~/.clawdbot/clawdbot.json` under `gateway.auth.token`.
+
+2. **Add to your `.env`:**
+   ```bash
+   CLAWDBOT_GATEWAY_URL=ws://127.0.0.1:18789
+   CLAWDBOT_GATEWAY_TOKEN=your_token_here
+   ```
+
+3. **Ensure Clawdbot is running** — the gateway must be active for voice chat to work.
+
+**Note:** The gateway runs on localhost only (`127.0.0.1`), so Clawdbot must be on the same machine as this voice bot.
+
+**Without Clawdbot:** If you don't set the gateway token, the bot will fall back to direct Claude API calls using `ANTHROPIC_API_KEY`.
+
 ## Usage
 
 ### First Run
