@@ -10,8 +10,9 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Gateway config - local Clawdbot instance
-GATEWAY_URL = "ws://127.0.0.1:18789"
-GATEWAY_TOKEN = "YOUR_GATEWAY_TOKEN_HERE"
+import os
+GATEWAY_URL = os.getenv("CLAWDBOT_GATEWAY_URL", "ws://127.0.0.1:18789")
+GATEWAY_TOKEN = os.getenv("CLAWDBOT_GATEWAY_TOKEN", "")
 
 # Protocol version
 PROTOCOL_VERSION = 3
