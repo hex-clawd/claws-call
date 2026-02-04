@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 # Gateway config - local Clawdbot instance
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 import os
 GATEWAY_URL = os.getenv("CLAWDBOT_GATEWAY_URL", "ws://127.0.0.1:18789")
