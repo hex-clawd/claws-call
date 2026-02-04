@@ -2,6 +2,8 @@
 
 import logging
 import asyncio
+import time
+import numpy as np
 from collections import deque
 from typing import Optional
 from pytgcalls import PyTgCalls, filters
@@ -19,6 +21,7 @@ from pytgcalls.types.raw import AudioParameters, AudioStream, Stream
 from ntgcalls import MediaSource
 import config
 from audio.utils import convert_telegram_to_whisper, convert_whisper_to_telegram, generate_silence
+from audio.vad import VAD
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,14 @@ class VoiceChat:
         self._playback_task: Optional[asyncio.Task] = None
         self._reconnect_task: Optional[asyncio.Task] = None
         
+        # Instant interrupt VAD - separate from pipeline's VAD for fast response
+        # This runs every N frames directly in the frame handler for minimal latency
+        self._interrupt_vad = VAD()
+        self._interrupt_frame_counter = 0
+        self._interrupt_vad_buffer = []  # Accumulate audio for VAD chunk
+        self._interrupt_check_interval = 10  # Check every 10 frames (~100ms at 10ms/frame)
+        self._vad_chunk_samples = 512  # Silero VAD needs exactly 512 samples at 16kHz
+        
         # Voice chat lifecycle flag - True if the voice chat itself is still active
         # This is different from is_connected - the chat can be active but we got disconnected
         # Only set to False when the voice chat truly ends (via on_voice_chat_ended)
@@ -79,6 +90,12 @@ class VoiceChat:
         
         # Lock for reconnection to prevent multiple concurrent reconnect attempts
         self._reconnect_lock = asyncio.Lock()
+        
+        # Frame timing and keepalive
+        # Primary silence-sending is in _playback_loop (every 30ms when buffer empty)
+        # Backup keepalive task catches any gaps the playback loop misses (every 40ms)
+        self._keepalive_task: Optional[asyncio.Task] = None
+        self._last_frame_time: float = 0  # Timestamp of last frame sent (real audio or silence)
 
         # Configuration
         self.group_id = config.VOICE_CHAT_GROUP_ID
@@ -121,6 +138,48 @@ class VoiceChat:
 
                 if self._frame_count <= 5:
                     logger.info(f"Converted to 16kHz mono: {len(audio_16k)} samples")
+
+                # ============================================================
+                # INSTANT INTERRUPT CHECK (sampled, with proper VAD chunks)
+                # Accumulates audio then runs VAD every N frames for fast interrupt
+                # without blocking the event loop on every frame.
+                # ============================================================
+                self._interrupt_frame_counter += 1
+                self._interrupt_vad_buffer.append(audio_16k)
+                
+                # Check every N frames (~100ms) - balance latency vs CPU
+                if self._interrupt_frame_counter >= self._interrupt_check_interval:
+                    self._interrupt_frame_counter = 0
+                    
+                    # Concatenate accumulated audio
+                    accumulated = np.concatenate(self._interrupt_vad_buffer)
+                    self._interrupt_vad_buffer = []
+                    
+                    # Only proceed if bot is outputting (potential interrupt scenario)
+                    buffer_has_audio = len(self.output_buffer) > 0
+                    pipeline_speaking = self.pipeline and self.pipeline.is_speaking
+                    bot_is_outputting = pipeline_speaking or buffer_has_audio
+                    
+                    if bot_is_outputting and len(accumulated) >= self._vad_chunk_samples:
+                        # Use first 512 samples for VAD (Silero requirement)
+                        vad_chunk = accumulated[:self._vad_chunk_samples]
+                        
+                        # Check for speech using our dedicated interrupt VAD
+                        is_speech = self._interrupt_vad.is_speech_active(vad_chunk)
+                        
+                        if is_speech:
+                            # ========== INSTANT INTERRUPTION ==========
+                            buffer_before = len(self.output_buffer)
+                            self.output_buffer.clear()
+                            self.is_playing = False
+                            
+                            # Notify the pipeline
+                            if self.pipeline:
+                                self.pipeline.interrupted.set()
+                                self.pipeline.is_speaking = False
+                            
+                            logger.info(f"🛑 INSTANT INTERRUPT (sampled): Cleared {buffer_before} chunks")
+                            # ==========================================
 
                 # Send to pipeline for processing (VAD -> STT -> LLM -> TTS)
                 if self.pipeline:
@@ -205,22 +264,42 @@ class VoiceChat:
             self.is_connected = True
             self._voice_chat_active = True
             self.reconnect_attempts = 0
+            self._last_frame_time = time.monotonic()  # Initialize for keepalive
             logger.info("Successfully joined voice chat - waiting for audio frames")
 
             # Start playback loop for outputting buffered audio
             self._playback_task = asyncio.create_task(self._playback_loop())
+            
+            # Start keepalive loop to prevent Telegram timeout during LLM streaming
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
         except Exception as e:
             logger.error(f"Failed to join voice chat: {e}")
             raise
 
     async def _playback_loop(self):
-        """Loop that sends buffered audio to the call using send_frame()."""
+        """Loop that sends buffered audio OR silence to prevent Telegram timeout.
+        
+        This is the PRIMARY source of frames to Telegram. Sends real audio when
+        available, otherwise sends silence frames every ~30ms to keep the connection
+        alive. The separate _keepalive_loop acts as a safety backup.
+        
+        Key insight: During LLM streaming, is_speaking=True but buffer is empty.
+        We must send silence during this "thinking" phase to prevent disconnect.
+        """
         logger.info("Playback loop started")
         frames_sent = 0
+        silence_sent = 0
+        silence = b'\x00' * CHUNK_SIZE  # 10ms of silence at 24kHz mono
+        
+        # Send silence every 30ms when buffer empty (must be < Telegram's timeout threshold)
+        silence_interval = 0.03  # 30ms
+        last_any_frame_time = time.monotonic()
 
         try:
             while self.is_connected:
+                now = time.monotonic()
+                
                 if self.output_buffer:
                     # Get chunk from buffer
                     chunk = self.output_buffer.popleft()
@@ -232,6 +311,8 @@ class VoiceChat:
                             Device.MICROPHONE,
                             chunk,
                         )
+                        last_any_frame_time = now
+                        self._last_frame_time = now  # Also update for keepalive backup
                         frames_sent += 1
                         
                         # Log progress periodically
@@ -256,22 +337,46 @@ class VoiceChat:
 
                     # Wait for chunk duration (10ms for 960 bytes at 48kHz mono)
                     await asyncio.sleep(0.01)
+                    
+                    # CRITICAL: Yield extra time for VAD processing every few frames
+                    if frames_sent % 5 == 0:
+                        await asyncio.sleep(0)  # Let other tasks run
                 else:
-                    # No audio to play - send silence to keep connection alive
-                    # 960 bytes of silence for 10ms at 48kHz 16-bit mono
-                    silence = b'\x00' * 960
-                    try:
-                        await self.pytgcalls.send_frame(
-                            self.group_id,
-                            Device.MICROPHONE,
-                            silence,
-                        )
-                    except Exception:
-                        pass  # Ignore errors on silence frames
+                    # Buffer empty - send silence if enough time has passed
+                    time_since_frame = now - last_any_frame_time
+                    
+                    if time_since_frame >= silence_interval:
+                        try:
+                            await self.pytgcalls.send_frame(
+                                self.group_id,
+                                Device.MICROPHONE,
+                                silence,
+                            )
+                            last_any_frame_time = now
+                            self._last_frame_time = now
+                            silence_sent += 1
+                            
+                            # Log silence frames periodically for debugging
+                            if silence_sent == 1:
+                                logger.debug("Playback loop: sending silence (buffer empty)")
+                            elif silence_sent % 100 == 0:  # Every ~3 seconds of silence
+                                logger.debug(f"Playback loop: {silence_sent} silence frames sent")
+                                
+                        except Exception as silence_error:
+                            error_str = str(silence_error).lower()
+                            if "not in a call" in error_str or "not initialized" in error_str:
+                                logger.warning(f"Disconnected from call (silence frame): {silence_error}")
+                                self.is_connected = False
+                                if self._voice_chat_active:
+                                    asyncio.create_task(self._trigger_reconnect())
+                                break
+                            # Ignore other errors on silence frames
+                    
+                    # Short sleep to check buffer frequently
                     await asyncio.sleep(0.01)
 
         except asyncio.CancelledError:
-            logger.info(f"Playback loop cancelled (sent {frames_sent} frames)")
+            logger.info(f"Playback loop cancelled (sent {frames_sent} audio, {silence_sent} silence)")
         except Exception as e:
             error_str = str(e).lower()
             logger.error(f"Playback loop error after {frames_sent} frames: {e}")
@@ -280,7 +385,65 @@ class VoiceChat:
                 self.is_connected = False
                 asyncio.create_task(self._trigger_reconnect())
         finally:
-            logger.info(f"Playback loop stopped (total frames sent: {frames_sent})")
+            logger.info(f"Playback loop stopped (audio: {frames_sent}, silence: {silence_sent})")
+
+    async def _keepalive_loop(self):
+        """BACKUP loop for sending silence frames to prevent Telegram timeout.
+        
+        The primary silence-sending is now in _playback_loop. This keepalive loop
+        acts as a safety backup in case the playback loop gets blocked or delayed.
+        
+        Uses a more aggressive interval (40ms) than playback loop's silence (30ms)
+        to avoid sending duplicate frames while still catching any gaps.
+        """
+        logger.info("Keepalive loop started (backup for playback loop)")
+        silence_sent = 0
+        silence = b'\x00' * CHUNK_SIZE  # 10ms of silence at 24kHz mono
+        
+        # More aggressive interval - if playback loop is working, this rarely triggers
+        # If playback loop is blocked, this catches it before timeout
+        backup_interval = 0.04  # 40ms - slightly longer than playback's 30ms
+
+        try:
+            while self.is_connected:
+                now = time.monotonic()
+                time_since_last = now - self._last_frame_time
+                
+                # Only send if no frame was sent for longer than backup interval
+                # This means playback loop isn't keeping up
+                if time_since_last >= backup_interval:
+                    try:
+                        await self.pytgcalls.send_frame(
+                            self.group_id,
+                            Device.MICROPHONE,
+                            silence,
+                        )
+                        self._last_frame_time = now
+                        silence_sent += 1
+                        
+                        # Log more verbosely since this should be rare if playback loop works
+                        if silence_sent <= 5:
+                            logger.info(f"Keepalive BACKUP fired (gap={time_since_last*1000:.0f}ms)")
+                        elif silence_sent % 50 == 0:
+                            logger.info(f"Keepalive backup: {silence_sent} frames (playback loop may be blocked)")
+                            
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        if "not in a call" in error_str or "not initialized" in error_str:
+                            logger.warning(f"Keepalive: disconnected from call: {e}")
+                            # Don't set is_connected=False here, let playback loop handle it
+                            break
+                        # Ignore other errors on silence frames
+                
+                # Check frequently to catch gaps quickly
+                await asyncio.sleep(0.02)  # 20ms
+                
+        except asyncio.CancelledError:
+            logger.info(f"Keepalive loop cancelled (backup frames sent: {silence_sent})")
+        except Exception as e:
+            logger.error(f"Keepalive loop error: {e}")
+        finally:
+            logger.info(f"Keepalive loop stopped (backup frames: {silence_sent})")
 
     async def leave_voice_chat(self, voice_chat_ended: bool = True):
         """Leave the voice chat.
@@ -313,6 +476,15 @@ class VoiceChat:
                 except asyncio.CancelledError:
                     pass
                 self._playback_task = None
+                
+            # Cancel keepalive task
+            if self._keepalive_task:
+                self._keepalive_task.cancel()
+                try:
+                    await self._keepalive_task
+                except asyncio.CancelledError:
+                    pass
+                self._keepalive_task = None
 
             # Only try to leave the call if we think we're connected
             if self.is_connected:
@@ -434,6 +606,15 @@ class VoiceChat:
                 pass
             self._playback_task = None
         
+        # Cancel keepalive task if still running
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except asyncio.CancelledError:
+                pass
+            self._keepalive_task = None
+        
         # Clear buffers but preserve state flags
         self.output_buffer.clear()
         self.is_connected = False
@@ -493,6 +674,13 @@ class VoiceChat:
                     self._playback_task.cancel()
                     try:
                         await self._playback_task
+                    except asyncio.CancelledError:
+                        pass
+                    
+                if self._keepalive_task and not self._keepalive_task.done():
+                    self._keepalive_task.cancel()
+                    try:
+                        await self._keepalive_task
                     except asyncio.CancelledError:
                         pass
 
