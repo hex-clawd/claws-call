@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Telegram Voice Call AI Assistant
+Telegram Voice Chat AI Assistant
 
-Entry point for the voice assistant bot.
-Supports both Phase 1 (voice messages) and Phase 2 (real-time voice chat).
+Real-time voice conversation in Telegram group voice chats.
+Bot monitors a group and auto-joins when a voice chat starts.
 """
 
 # Monkey-patch pyrogram.errors for pytgcalls compatibility
@@ -18,7 +18,10 @@ _patch_pyrogram_errors()
 import logging
 import sys
 import asyncio
-from bot.userbot import VoiceBot
+from pyrogram import Client, filters
+from pyrogram.raw.functions.channels import GetFullChannel
+from bot.voice_chat import VoiceChat
+from pipeline.voice_pipeline import VoicePipeline
 import config
 
 
@@ -34,17 +37,12 @@ def setup_logging():
     )
 
 
-async def run_voice_chat_mode():
-    """Run in voice chat mode (Phase 2).
+async def run_voice_chat():
+    """Run the voice chat bot.
     
     Bot monitors the group and auto-joins when a voice chat starts.
     Leaves when the voice chat ends.
     """
-    from pyrogram import Client, filters
-    from pyrogram.raw.functions.channels import GetFullChannel
-    from bot.voice_chat import VoiceChat
-    from pipeline.voice_pipeline import VoicePipeline
-
     logger = logging.getLogger(__name__)
 
     # Create Pyrogram client
@@ -126,7 +124,7 @@ async def run_voice_chat_mode():
         @app.on_message(filters.chat(config.VOICE_CHAT_GROUP_ID) & filters.video_chat_ended)
         async def on_voice_chat_ended(client, message):
             """Called when a voice chat ends in the monitored group."""
-            logger.info(f"Voice chat ENDED in group {message.chat.id}! (This is a true end, not a disconnect)")
+            logger.info(f"Voice chat ENDED in group {message.chat.id}!")
             await leave_call(voice_chat_ended=True)
 
         logger.info(f"Monitoring group {config.VOICE_CHAT_GROUP_ID} for voice chats...")
@@ -147,29 +145,14 @@ async def run_voice_chat_mode():
             await asyncio.sleep(1)
 
     except KeyboardInterrupt:
-        logger.info("Stopping voice chat mode...")
+        logger.info("Stopping...")
         await leave_call(voice_chat_ended=True)
         await app.stop()
     except Exception as e:
-        logger.error(f"Error in voice chat mode: {e}", exc_info=True)
+        logger.error(f"Error: {e}", exc_info=True)
         await leave_call(voice_chat_ended=True)
         await app.stop()
         raise
-
-
-def run_voice_message_mode():
-    """Run in voice message mode (Phase 1)."""
-    logger = logging.getLogger(__name__)
-    bot = VoiceBot()
-    logger.info("=" * 60)
-    logger.info("Telegram Voice Call AI Assistant - Voice Message Mode")
-    logger.info("=" * 60)
-    logger.info(f"Authorized user ID: {config.AUTHORIZED_USER_ID}")
-    logger.info(f"Whisper model: {config.WHISPER_MODEL}")
-    logger.info(f"Claude model: {config.CLAUDE_MODEL}")
-    logger.info("Bot is ready. Send a voice message to start!")
-    logger.info("=" * 60)
-    bot.run()
 
 
 def main():
@@ -182,26 +165,16 @@ def main():
         config.validate_config()
         logger.info("Configuration validated successfully")
 
-        # Determine mode
-        mode = config.BOT_MODE
-
         logger.info("=" * 60)
-        logger.info(f"Telegram Voice Call AI Assistant - {mode.upper().replace('_', ' ')} MODE")
+        logger.info("Telegram Voice Chat AI Assistant")
         logger.info("=" * 60)
         logger.info(f"Authorized user ID: {config.AUTHORIZED_USER_ID}")
+        logger.info(f"Voice chat group ID: {config.VOICE_CHAT_GROUP_ID}")
         logger.info(f"Whisper model: {config.WHISPER_MODEL}")
-        logger.info(f"Claude model: {config.CLAUDE_MODEL}")
+        logger.info(f"VAD silence threshold: {config.VAD_SILENCE_THRESHOLD_MS}ms")
+        logger.info("=" * 60)
 
-        if mode == "voice_chat":
-            logger.info(f"Voice chat group ID: {config.VOICE_CHAT_GROUP_ID}")
-            logger.info(f"VAD silence threshold: {config.VAD_SILENCE_THRESHOLD_MS}ms")
-            logger.info("=" * 60)
-            logger.info("Starting voice chat mode...")
-            asyncio.run(run_voice_chat_mode())
-        else:
-            logger.info("=" * 60)
-            logger.info("Starting voice message mode...")
-            run_voice_message_mode()
+        asyncio.run(run_voice_chat())
 
     except ValueError as e:
         logger.error(f"Configuration error: {e}")

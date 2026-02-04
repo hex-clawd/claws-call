@@ -3,7 +3,6 @@
 import logging
 import numpy as np
 from scipy import signal
-import struct
 import config
 
 logger = logging.getLogger(__name__)
