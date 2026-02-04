@@ -1,4 +1,4 @@
-# Telegram Claw Call
+# Claws Call 🦞
 
 Talk to your OpenClaw agent through Telegram voice chat. Not a chatbot — your personal AI assistant with full tool access, memory, and context.
 
