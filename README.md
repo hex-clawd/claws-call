@@ -30,6 +30,30 @@ Back to Voice Chat
 ```
 
 ## Requirements
+## Important: This is a Userbot
+
+This project uses **MTProto/Pyrogram** (userbot), not the Telegram Bot API. Why?
+
+- Telegram's Bot API **doesn't support voice calls**
+- Only real Telegram accounts can join voice chats
+- The bot logs into a Telegram account and acts as that user
+
+### Implications
+
+- You need a **real Telegram account** (phone number required)
+- The bot **is** that account while running — actions appear as coming from it
+- Consider using a **dedicated phone number** for the bot:
+  - Keeps your main account separate
+  - No interference with personal Telegram use
+  - Cheap prepaid SIM or eSIM works fine
+
+### Recommendation
+
+Get a separate SIM card or eSIM just for the bot. This way:
+- Your main Telegram account stays untouched
+- The bot has its own identity
+- You can run it 24/7 without affecting your personal use
+
 
 - Python 3.11+
 - macOS (Apple Silicon) or Linux
