@@ -240,7 +240,7 @@ class VoiceChat:
             # Handler for ALL stream_frame events (debug)
             @self.pytgcalls.on_update(filters.stream_frame())
             def on_any_frame(client: PyTgCalls, update: StreamFrames):
-                logger.info(f"FRAME: dir={update.direction}, dev={update.device}, count={len(update.frames)}")
+                logger.debug(f"FRAME: dir={update.direction}, dev={update.device}, count={len(update.frames)}")
 
             # Handler for incoming audio - EXACTLY as in bridged_calls example
             @self.pytgcalls.on_update(
@@ -250,7 +250,7 @@ class VoiceChat:
                 )
             )
             def on_incoming_audio(client: PyTgCalls, update: StreamFrames):
-                logger.info(f"INCOMING AUDIO: {len(update.frames)} frames")
+                logger.debug(f"INCOMING AUDIO: {len(update.frames)} frames")
                 asyncio.create_task(self._handle_incoming_audio(update))
 
             # Handler for stream end
