@@ -203,7 +203,30 @@ class VoiceChat:
 
             logger.info(f"Joining voice chat in group {self.group_id}...")
 
-            # Step 1: Start pytgcalls
+            # Step 1: Register handlers BEFORE starting pytgcalls
+            # This ensures handlers are ready when frames arrive
+            @self.pytgcalls.on_update(filters.stream_frame())
+            def on_any_frame(client: PyTgCalls, update: StreamFrames):
+                logger.debug(f"FRAME: dir={update.direction}, dev={update.device}, count={len(update.frames)}")
+
+            @self.pytgcalls.on_update(
+                filters.stream_frame(
+                    Direction.INCOMING,
+                    Device.MICROPHONE,
+                )
+            )
+            def on_incoming_audio(client: PyTgCalls, update: StreamFrames):
+                logger.debug(f"INCOMING AUDIO: {len(update.frames)} frames")
+                asyncio.create_task(self._handle_incoming_audio(update))
+
+            @self.pytgcalls.on_update(filters.stream_end)
+            def on_stream_end(client: PyTgCalls, update: StreamEnded):
+                logger.info(f"Stream ended for chat {update.chat_id}")
+                asyncio.create_task(self.handle_stream_end())
+            
+            logger.info("Audio frame handlers registered")
+
+            # Step 2: Start pytgcalls
             await self.pytgcalls.start()
             logger.info("pytgcalls started")
 
@@ -235,31 +258,6 @@ class VoiceChat:
                 ),
             )
             logger.info("RecordStream enabled - listening for incoming audio")
-
-            # Step 4: Register handlers
-            # Handler for ALL stream_frame events (debug)
-            @self.pytgcalls.on_update(filters.stream_frame())
-            def on_any_frame(client: PyTgCalls, update: StreamFrames):
-                logger.debug(f"FRAME: dir={update.direction}, dev={update.device}, count={len(update.frames)}")
-
-            # Handler for incoming audio - EXACTLY as in bridged_calls example
-            @self.pytgcalls.on_update(
-                filters.stream_frame(
-                    Direction.INCOMING,
-                    Device.MICROPHONE,
-                )
-            )
-            def on_incoming_audio(client: PyTgCalls, update: StreamFrames):
-                logger.debug(f"INCOMING AUDIO: {len(update.frames)} frames")
-                asyncio.create_task(self._handle_incoming_audio(update))
-
-            # Handler for stream end
-            @self.pytgcalls.on_update(filters.stream_end)
-            def on_stream_end(client: PyTgCalls, update: StreamEnded):
-                logger.info(f"Stream ended for chat {update.chat_id}")
-                asyncio.create_task(self.handle_stream_end())
-
-            logger.info("Audio frame handlers registered")
 
             self.is_connected = True
             self._voice_chat_active = True
